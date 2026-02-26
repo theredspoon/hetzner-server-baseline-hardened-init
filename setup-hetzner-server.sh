@@ -146,7 +146,9 @@ s3_ssh_hardening() {
     set_sshd_directive "ChallengeResponseAuthentication" "no"
     set_sshd_directive "X11Forwarding"                 "no"
     set_sshd_directive "AllowAgentForwarding"          "no"
-    set_sshd_directive "AllowTcpForwarding"            "no"
+    set_sshd_directive "AllowTcpForwarding"            "yes"
+    set_sshd_directive "AllowStreamLocalForwarding"    "yes"
+    set_sshd_directive "PermitOpen"                    "any"
     set_sshd_directive "MaxAuthTries"                  "3"
     set_sshd_directive "LoginGraceTime"                "30"
 

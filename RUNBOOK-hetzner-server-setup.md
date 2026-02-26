@@ -56,6 +56,7 @@ usermod -aG sudo <username>
 ```
 
 Copy SSH key to new user:
+
 ```bash
 mkdir -p /home/<username>/.ssh
 cp ~/.ssh/authorized_keys /home/<username>/.ssh/
@@ -65,11 +66,13 @@ chmod 600 /home/<username>/.ssh/authorized_keys
 ```
 
 Verify sudo works:
+
 ```bash
 sudo whoami  # should return: root
 ```
 
 Lock the root password — root login is already blocked via SSH but locking the password adds defense-in-depth against local escalation:
+
 ```bash
 sudo passwd -l root
 ```
@@ -85,7 +88,8 @@ sudo nano /etc/ssh/sshd_config
 ```
 
 Set or confirm the following directives (uncomment and edit as needed):
-```
+
+```text
 PermitRootLogin no
 PasswordAuthentication no
 PermitEmptyPasswords no
@@ -93,22 +97,28 @@ PubkeyAuthentication yes
 ChallengeResponseAuthentication no
 X11Forwarding no
 AllowAgentForwarding no
-AllowTcpForwarding no
+AllowTcpForwarding yes
+AllowStreamLocalForwarding yes
+PermitOpen any
 MaxAuthTries 3
 LoginGraceTime 30
 AllowUsers <username>
 ```
 
+`AllowTcpForwarding yes`, `AllowStreamLocalForwarding yes`, and `PermitOpen any` are used for VS Code's SSH tunneling.
+
 `AllowUsers` explicitly restricts SSH to the named user(s). Prevents any future system or service account from being able to log in even if it somehow acquired a key.
 
 Restart SSH (Ubuntu 24.04 uses `ssh` not `sshd`):
+
 ```bash
 sudo systemctl restart ssh
 ```
 
-**Note:** `AllowTcpForwarding no` blocks SSH tunneling. If a specific application requires SSH port forwarding later, re-enable explicitly for that use case. `LoginGraceTime` may need to be increased if automated SSH scripts or CI/CD are added.
+`LoginGraceTime` may need to be increased if automated SSH scripts or CI/CD are added.
 
 Record the server's SSH host key fingerprint in the LOGBOOK — used to verify identity on future connections:
+
 ```bash
 ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 ```
@@ -123,11 +133,13 @@ sudo reboot  # if kernel was updated
 ```
 
 Verify `ca-certificates` is installed — required for HTTPS connections from apt and curl:
+
 ```bash
 dpkg -l ca-certificates || sudo apt install -y ca-certificates
 ```
 
 Enable unattended upgrades:
+
 ```bash
 sudo dpkg-reconfigure --priority=low unattended-upgrades
 # Select: Yes
@@ -135,7 +147,7 @@ sudo dpkg-reconfigure --priority=low unattended-upgrades
 
 Configure cleanup and automatic reboot in `/etc/apt/apt.conf.d/50unattended-upgrades`. Find and uncomment these lines:
 
-```
+```text
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}";
     "${distro_id}:${distro_codename}-security";
@@ -154,11 +166,13 @@ Unattended-Upgrade::MailOnlyOnError "true";
 `Mail "root"` routes failure notifications to the local root mailbox. Once postfix relay is configured post-deployment, these will be forwarded externally automatically.
 
 Also add this line to the `Allowed-Origins` block:
-```
+
+```text
 "origin=Docker,codename=${distro_codename},label=Docker CE";
 ```
 
 Verify timers are active after configuration:
+
 ```bash
 systemctl list-timers | grep apt-daily
 ```
@@ -172,11 +186,14 @@ sudo nano /etc/needrestart/needrestart.conf
 ```
 
 Find and replace:
-```
+
+```text
 #$nrconf{restart} = 'i';
 ```
+
 with:
-```
+
+```text
 $nrconf{restart} = 'a';
 ```
 
@@ -211,6 +228,7 @@ sudo systemctl start fail2ban
 ```
 
 Verify the SSH jail is active:
+
 ```bash
 sudo fail2ban-client status sshd
 ```
@@ -232,18 +250,21 @@ sudo apt install -y logwatch
 ```
 
 Verify it works:
+
 ```bash
 sudo logwatch --detail Med --range today
 ```
 
 Configure detail level:
+
 ```bash
 sudo mkdir -p /etc/logwatch/conf
 sudo nano /etc/logwatch/conf/logwatch.conf
 ```
 
 Add this line, then save (Ctrl+O) and exit (Ctrl+X):
-```
+
+```text
 Detail = Med
 ```
 
@@ -314,6 +335,7 @@ sudo augenrules --load
 ```
 
 Verify rules loaded:
+
 ```bash
 sudo auditctl -l
 sudo systemctl status auditd
@@ -338,7 +360,6 @@ sudo apt install -y \
 
 `ncdu` — interactive disk usage browser (`ncdu /var/log`, arrow keys to navigate). `rsync` — efficient file transfer and backup operations. `bash-completion` — tab completion for apt, git, systemctl, and other tools. `git` — version control; also used by some deployment workflows. `netcat-openbsd` — TCP/UDP debugging, port testing (`nc -zv <host> <port>`).
 
-
 ---
 
 ## 8. Swap
@@ -354,6 +375,7 @@ echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
 ```
 
 Verify:
+
 ```bash
 free -h
 # Swap line should show expected total, 0B used
@@ -374,6 +396,7 @@ sudo systemctl enable --now docker
 ```
 
 Log out and back in for group membership to take effect. Verify:
+
 ```bash
 docker run --rm hello-world
 docker builder prune -f
@@ -393,6 +416,7 @@ sudo nano /etc/docker/daemon.json
 ```
 
 Add:
+
 ```json
 {
   "log-driver": "local"
@@ -436,9 +460,10 @@ sudo systemctl enable docker-prune.timer
 sudo systemctl start docker-prune.timer
 ```
 
-The `--filter "until=168h"` flag limits pruning to resources unused for at least 7 days, protecting recently pulled images. 
+The `--filter "until=168h"` flag limits pruning to resources unused for at least 7 days, protecting recently pulled images.
 
 What this prune does and does not remove:
+
 - ✓ Removes stopped containers unused for 7+ days
 - ✓ Removes unused images unused for 7+ days
 - ✓ Removes unused networks
@@ -447,6 +472,7 @@ What this prune does and does not remove:
 - ✗ Does NOT touch running containers
 
 Verify timer is scheduled:
+
 ```bash
 sudo systemctl list-timers docker-prune.timer
 ```
@@ -488,6 +514,7 @@ sudo sysctl --system
 ```
 
 Verify applied:
+
 ```bash
 sysctl net.ipv4.tcp_syncookies fs.suid_dumpable
 # Should return 1 for both
@@ -500,6 +527,7 @@ sysctl net.ipv4.tcp_syncookies fs.suid_dumpable
 Logwatch and unattended-upgrades write to `/var/mail/root` by default — invisible unless you SSH in. Postfix is installed by default on Ubuntu and handles local mail delivery. Configure it as a satellite relay to forward to an external mailbox post-deployment.
 
 Ensure postfix is installed and running (automated by the setup script):
+
 ```bash
 sudo apt install -y postfix
 sudo systemctl enable --now postfix
@@ -548,7 +576,7 @@ If any of these are found during snapshot hygiene, abort and clean before procee
 
 ### Verify configuration
 
-- [ ] SSH: confirm `PermitRootLogin no`, `AllowTcpForwarding no`, `MaxAuthTries 3`, `AllowUsers <username>` in sshd_config
+- [ ] SSH: confirm `PermitRootLogin no`, `AllowTcpForwarding yes`, `MaxAuthTries 3`, `AllowUsers <username>` in sshd_config
 - [ ] Verify time sync: `timedatectl status` — `systemd-timesyncd` should be active
 - [ ] Verify AppArmor is active: `sudo systemctl status apparmor`
 - [ ] Verify auditd is running: `sudo systemctl status auditd`
@@ -569,6 +597,7 @@ If any of these are found during snapshot hygiene, abort and clean before procee
 ### Validation command block
 
 Run and confirm clean output:
+
 ```bash
 sudo systemctl --failed
 sudo ufw status verbose

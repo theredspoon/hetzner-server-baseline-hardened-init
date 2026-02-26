@@ -19,7 +19,7 @@ Runbook and automation script for hardening a fresh Hetzner Ubuntu 24.04 server 
 
 | Section | What it does |
 |---|---|
-| 3 | SSH hardening — disables root login, password auth, forwarding; sets AllowUsers, MaxAuthTries, LoginGraceTime; locks root password |
+| 3 | SSH hardening — disables root login/password auth, keeps agent forwarding off, enables TCP forwarding for VS Code SSH tunneling; sets AllowUsers, MaxAuthTries, LoginGraceTime; locks root password |
 | 4 | Package updates, unattended-upgrades with Docker and -updates origins, needrestart automatic mode |
 | 5 | UFW firewall — default deny incoming, rate-limit SSH |
 | 6 | Fail2ban — SSH jail |
