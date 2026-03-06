@@ -226,6 +226,11 @@ trigger_snapshot() {
         die "Snapshot cancelled by user"
     fi
 
+    # Delete self before snapshot (script will complete from memory)
+    log_info "Removing setup script before snapshot..."
+    rm -f "$0"
+    log_ok "Script removed"
+
     # Trigger snapshot via API
     log_info "Initiating snapshot via Hetzner API..."
     local response
