@@ -11,13 +11,13 @@
 #   ./setup-hetzner-server.sh <username> [swap_size_gb]
 #   ./setup-hetzner-server.sh <username> --verify              # validation only
 #   ./setup-hetzner-server.sh <username> --snapshot <name>     # verify + hygiene + snapshot
-#   ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh <username> --verify
+#   ./setup-hetzner-server.sh <username> --verify --allow-rpfilter-loose
 #
 # Examples:
 #   ./setup-hetzner-server.sh finless1strepair 2
 #   ./setup-hetzner-server.sh finless1strepair --verify
 #   ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-hardened-init-baseline-20260306
-#   ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-hardened-init-baseline-20260306
+#   ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-hardened-init-baseline-20260306 --allow-rpfilter-loose
 #
 # The script is idempotent — safe to re-run after a reboot or partial failure.
 # =============================================================================
@@ -32,25 +32,45 @@ SWAP_GB="2"
 VERIFY_ONLY=false
 SNAPSHOT_MODE=false
 SNAPSHOT_NAME=""
-ALLOW_RPFILTER_LOOSE="${ALLOW_RPFILTER_LOOSE:-false}"
+ALLOW_RPFILTER_LOOSE=false
 
 if [[ $# -ge 2 ]]; then
-    if [[ "$2" == "--verify" ]]; then
-        VERIFY_ONLY=true
-    elif [[ "$2" == "--snapshot" ]]; then
-        SNAPSHOT_MODE=true
-        if [[ -z "${3:-}" ]]; then
-            echo "Usage: $0 <username> --snapshot <snapshot-name>" >&2
-            echo "Error: --snapshot requires a snapshot name" >&2
-            exit 1
-        fi
-        SNAPSHOT_NAME="$3"
-    elif [[ "$2" =~ ^[0-9]+$ ]]; then
-        SWAP_GB="$2"
-    else
-        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>]" >&2
-        exit 1
-    fi
+    shift
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --verify)
+                VERIFY_ONLY=true
+                ;;
+            --snapshot)
+                SNAPSHOT_MODE=true
+                if [[ -z "${2:-}" ]]; then
+                    echo "Usage: $0 <username> --snapshot <snapshot-name> [--allow-rpfilter-loose]" >&2
+                    echo "Error: --snapshot requires a snapshot name" >&2
+                    exit 1
+                fi
+                SNAPSHOT_NAME="$2"
+                shift
+                ;;
+            --allow-rpfilter-loose)
+                ALLOW_RPFILTER_LOOSE=true
+                ;;
+            *)
+                if [[ "$1" =~ ^[0-9]+$ && "$SWAP_GB" == "2" && "$VERIFY_ONLY" == false && "$SNAPSHOT_MODE" == false ]]; then
+                    SWAP_GB="$1"
+                else
+                    echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>] [--allow-rpfilter-loose]" >&2
+                    exit 1
+                fi
+                ;;
+        esac
+        shift
+    done
+fi
+
+if [[ "$VERIFY_ONLY" == true && "$SNAPSHOT_MODE" == true ]]; then
+    echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>] [--allow-rpfilter-loose]" >&2
+    echo "Error: --verify and --snapshot cannot be used together" >&2
+    exit 1
 fi
 
 # --- Colours & logging -------------------------------------------------------

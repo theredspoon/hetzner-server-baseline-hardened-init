@@ -527,8 +527,8 @@ If Tailscale, subnet routing, policy routing, multiple interfaces, or other inte
 The setup script enforces this distinction explicitly:
 
 - Default behavior: `rp_filter=1` is expected on the primary interface
-- If intentional multi-path routing is configured, re-run verification or snapshot mode with `ALLOW_RPFILTER_LOOSE=true`
-- Do not use `ALLOW_RPFILTER_LOOSE=true` on a plain baseline server
+- If intentional multi-path routing is configured, re-run verification or snapshot mode with `--allow-rpfilter-loose`
+- Do not use `--allow-rpfilter-loose` on a plain baseline server
 
 ---
 
@@ -623,7 +623,7 @@ sysctl net.ipv4.conf.$(ip route | awk '/default/{print $5; exit}').rp_filter
 # 2 is acceptable only when intentional multi-path routing exists (for example Tailscale or other advanced networking)
 # 0 is not acceptable
 # Script override for intentional multi-path routing:
-# ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh <username> --verify
+# ./setup-hetzner-server.sh <username> --verify --allow-rpfilter-loose
 sudo systemctl list-unit-files --state=enabled
 # Review for unexpected enabled services before freezing image
 ```
