@@ -1031,6 +1031,38 @@ s12_backups() {
 }
 
 # =============================================================================
+# HOSTNAME PROMPT
+# =============================================================================
+prompt_hostname() {
+    log_section "Hostname"
+
+    local current_hostname new_hostname
+    current_hostname=$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null || echo "unknown")
+
+    echo "  Current hostname: ${BOLD}${current_hostname}${RESET}"
+    read -r -p "  Change hostname now? [y/N] " confirm
+
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        log_info "Hostname unchanged"
+        return
+    fi
+
+    read -r -p "  New hostname: " new_hostname
+    [[ -n "$new_hostname" ]] || die "Hostname cannot be empty"
+    [[ "$new_hostname" =~ ^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$ ]] \
+        || die "Invalid hostname. Use letters, numbers, dots, and hyphens only."
+
+    if [[ "$new_hostname" == "$current_hostname" ]]; then
+        log_ok "Hostname already set to $new_hostname"
+        return
+    fi
+
+    sudo hostnamectl set-hostname "$new_hostname" || die "Failed to set hostname"
+    log_ok "Hostname set to $new_hostname"
+    record_change "Set hostname: $new_hostname"
+}
+
+# =============================================================================
 # CHANGE REPORT
 # =============================================================================
 print_change_report() {
@@ -1177,46 +1209,29 @@ run_verify() {
     # Check Docker origin
     grep -qF 'Docker CE' "$uu50" && log_ok "Docker origin enabled" || warn "Docker origin not enabled"
     
-    # Check cleanup settings
+    # Check cleanup settings (in 51unattended-upgrades-local)
     log_info "  Cleanup & reboot settings:"
-    grep -q 'Remove-Unused-Kernel-Packages.*"true"' "$uu51" 2>/dev/null \
-        && log_ok "  Remove-Unused-Kernel-Packages true" \
-        || warn "  Remove-Unused-Kernel-Packages not set to true"
-    grep -q 'Remove-New-Unused-Dependencies.*"true"' "$uu51" 2>/dev/null \
-        && log_ok "  Remove-New-Unused-Dependencies true" \
-        || warn "  Remove-New-Unused-Dependencies not set to true"
-    grep -q 'Remove-Unused-Dependencies.*"true"' "$uu51" 2>/dev/null \
-        && log_ok "  Remove-Unused-Dependencies true" \
-        || warn "  Remove-Unused-Dependencies not set to true"
-    
-    # Check reboot settings
-    grep -q 'Automatic-Reboot.*"true"' "$uu51" 2>/dev/null \
-        && log_ok "  Automatic-Reboot true" \
-        || warn "  Automatic-Reboot not set to true"
-    grep -q 'Automatic-Reboot-Time.*"03:00"' "$uu51" 2>/dev/null \
-        && log_ok "  Automatic-Reboot-Time 03:00" \
-        || warn "  Automatic-Reboot-Time not set to 03:00"
     grep -qF 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' "$uu51" \
-        && log_ok "Remove-Unused-Kernel-Packages enabled" \
-        || warn "Remove-Unused-Kernel-Packages not enabled"
+        && log_ok "  Remove-Unused-Kernel-Packages enabled" \
+        || warn "  Remove-Unused-Kernel-Packages not enabled"
     grep -qF 'Unattended-Upgrade::Remove-New-Unused-Dependencies "true";' "$uu51" \
-        && log_ok "Remove-New-Unused-Dependencies enabled" \
-        || warn "Remove-New-Unused-Dependencies not enabled"
+        && log_ok "  Remove-New-Unused-Dependencies enabled" \
+        || warn "  Remove-New-Unused-Dependencies not enabled"
     grep -qF 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "$uu51" \
-        && log_ok "Remove-Unused-Dependencies enabled" \
-        || warn "Remove-Unused-Dependencies not enabled"
+        && log_ok "  Remove-Unused-Dependencies enabled" \
+        || warn "  Remove-Unused-Dependencies not enabled"
     grep -qF 'Unattended-Upgrade::Automatic-Reboot "true";' "$uu51" \
-        && log_ok "Automatic-Reboot enabled" \
-        || warn "Automatic-Reboot not enabled"
+        && log_ok "  Automatic-Reboot enabled" \
+        || warn "  Automatic-Reboot not enabled"
     grep -qF 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";' "$uu51" \
-        && log_ok "Automatic-Reboot-Time set to 03:00" \
-        || warn "Automatic-Reboot-Time not set to 03:00"
+        && log_ok "  Automatic-Reboot-Time set to 03:00" \
+        || warn "  Automatic-Reboot-Time not set to 03:00"
     grep -qF 'Unattended-Upgrade::Mail "root";' "$uu51" \
-        && log_ok 'Unattended-Upgrade::Mail set to "root"' \
-        || warn 'Unattended-Upgrade::Mail not set to "root"'
+        && log_ok '  Mail set to "root"' \
+        || warn '  Mail not set to "root"'
     grep -qF 'Unattended-Upgrade::MailOnlyOnError "true";' "$uu51" \
-        && log_ok "MailOnlyOnError enabled" \
-        || warn "MailOnlyOnError not enabled"
+        && log_ok "  MailOnlyOnError enabled" \
+        || warn "  MailOnlyOnError not enabled"
 
     echo
     log_info "── needrestart mode ──"
@@ -1353,6 +1368,10 @@ run_verify() {
 # SUMMARY
 # =============================================================================
 print_summary() {
+    local script_cmd snapshot_hint
+    script_cmd="$0 $USERNAME"
+    snapshot_hint="$0 $USERNAME --snapshot ubuntu-24.04-hardened-init-baseline-$(date +%Y%m%d)"
+
     echo
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════════${RESET}"
     echo -e "${BOLD}  Setup complete${RESET}"
@@ -1370,11 +1389,9 @@ print_summary() {
     echo "  Remaining manual steps before snapshot:"
     echo "    1. Log out and back in (docker group takes effect)"
     echo "    2. Set timezone:   sudo timedatectl set-timezone UTC"
-    echo "    3. Set hostname:   sudo hostnamectl set-hostname <hostname>"
-    echo "    4. Run verify:     $0 $USERNAME --verify"
-    echo "    5. Delete script:  rm ~/$( basename "$0" )"
-    echo "    6. Run snapshot hygiene (section 14 of runbook)"
-    echo "    7. Take snapshot in Hetzner console"
+    echo "    3. Run verify:     ${script_cmd} --verify"
+    echo "    4. Prepare Hetzner API token (Read & Write permissions)"
+    echo "    5. Run snapshot:   ${snapshot_hint}"
     echo
 }
 
@@ -1465,6 +1482,7 @@ main() {
     s10_kernel_hardening
     s11_postfix
     s12_backups
+    prompt_hostname
 
     print_change_report
     print_summary
