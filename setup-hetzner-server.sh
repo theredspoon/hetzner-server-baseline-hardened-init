@@ -1196,7 +1196,7 @@ main() {
         
         # Check for API token FIRST (before any destructive operations)
         if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
-            die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens"
+            die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens\n       Required permissions: Read & Write"
         fi
         
         log_info "Running verification checks before snapshot..."
