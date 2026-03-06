@@ -69,6 +69,7 @@ die()         { log_error "$*"; cleanup_change_tracking; exit 1; }
 # Track warnings for summary
 WARNINGS=()
 warn() { log_warn "$*"; WARNINGS+=("$*"); }
+info_note() { log_info "$*"; }
 
 # Track applied changes and file diffs for end-of-run reporting
 CHANGE_LOG=()
@@ -1133,6 +1134,11 @@ run_verify() {
 
     echo
     log_info "── Time sync status ──"
+    local ntp_active clock_sync
+    ntp_active=$(timedatectl show --property=NTP --value 2>/dev/null || echo "unknown")
+    clock_sync=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "unknown")
+    [[ "$ntp_active" == "yes" ]] || warn "NTP is $ntp_active, expected yes"
+    [[ "$clock_sync" == "yes" ]] || warn "NTPSynchronized is $clock_sync, expected yes"
     timedatectl status || true
 
     echo
@@ -1162,11 +1168,15 @@ run_verify() {
 
     echo
     log_info "── apt timers ──"
-    if systemctl list-timers --all 2>/dev/null | grep -q 'apt-daily'; then
-        log_ok "apt timers present"
-    else
-        warn "apt timers not found"
-    fi
+    local apt_daily_enabled apt_daily_upgrade_enabled
+    apt_daily_enabled=$(systemctl is-enabled apt-daily.timer 2>/dev/null || echo "unknown")
+    apt_daily_upgrade_enabled=$(systemctl is-enabled apt-daily-upgrade.timer 2>/dev/null || echo "unknown")
+    [[ "$apt_daily_enabled" == "enabled" ]] \
+        && log_ok "apt-daily.timer enabled" \
+        || warn "apt-daily.timer is $apt_daily_enabled, expected enabled"
+    [[ "$apt_daily_upgrade_enabled" == "enabled" ]] \
+        && log_ok "apt-daily-upgrade.timer enabled" \
+        || warn "apt-daily-upgrade.timer is $apt_daily_upgrade_enabled, expected enabled"
     systemctl list-timers | grep apt || true
 
     echo
@@ -1307,7 +1317,7 @@ run_verify() {
                 log_ok "Primary interface rp_filter is strict (1)"
                 ;;
             2)
-                warn "net.ipv4.conf.${iface}.rp_filter = 2 (loose mode). Acceptable only when intentional multi-path routing is configured, such as Tailscale."
+                info_note "net.ipv4.conf.${iface}.rp_filter = 2 (loose mode). Acceptable only when intentional multi-path routing is configured, such as Tailscale."
                 ;;
             0)
                 warn "net.ipv4.conf.${iface}.rp_filter = 0, expected 1 for the base image and never 0"
