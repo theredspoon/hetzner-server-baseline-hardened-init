@@ -173,11 +173,15 @@ run_hygiene() {
 
     if [[ ${#issues[@]} -gt 0 ]]; then
         echo
-        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        log_warn "Found ${#issues[@]} potential issue(s) — review above"
-        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
-        [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Clean up files and retry, or use --verify to check state."
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_error "SNAPSHOT BLOCKED: Found ${#issues[@]} forbidden item(s)"
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        for issue in "${issues[@]}"; do
+            log_error "  - $issue"
+        done
+        log_error "Remove these items before creating a snapshot."
+        log_error "See RUNBOOK section 13: What Does NOT Belong in the Snapshot"
+        die "Snapshot hygiene failed — cannot proceed with forbidden files present"
     fi
 
     log_ok "Snapshot hygiene complete — server ready for snapshot"
@@ -1086,8 +1090,27 @@ run_verify() {
     log_section "Verification (section 14)"
 
     echo
+    log_info "── Timezone & Hostname ──"
+    local timezone hostname
+    timezone=$(timedatectl show --property=Timezone --value 2>/dev/null || timedatectl | grep "Time zone" | awk '{print $3}')
+    hostname=$(hostnamectl --static 2>/dev/null || hostname)
+    echo "  Timezone: ${timezone:-unknown}"
+    echo "  Hostname: ${hostname:-unknown}"
+    [[ "$timezone" == "UTC" ]] || warn "Timezone is $timezone, expected UTC"
+    [[ -n "$hostname" && "$hostname" != "localhost" ]] || warn "Hostname not set or is localhost"
+
+    echo
     log_info "── Time sync status ──"
     timedatectl status || true
+
+    echo
+    log_info "── SSH Hardening Checks ──"
+    local sshd_cfg="/etc/ssh/sshd_config"
+    grep -qE "^PermitRootLogin no" "$sshd_cfg" && log_ok "PermitRootLogin no" || warn "PermitRootLogin not set to no"
+    grep -qE "^PasswordAuthentication no" "$sshd_cfg" && log_ok "PasswordAuthentication no" || warn "PasswordAuthentication not set to no"
+    grep -qE "^AllowTcpForwarding yes" "$sshd_cfg" && log_ok "AllowTcpForwarding yes" || warn "AllowTcpForwarding not set to yes"
+    grep -qE "^MaxAuthTries 3" "$sshd_cfg" && log_ok "MaxAuthTries 3" || warn "MaxAuthTries not set to 3"
+    grep -qE "^AllowUsers" "$sshd_cfg" && log_ok "AllowUsers directive present" || warn "AllowUsers not set"
 
     echo
     log_info "── AppArmor status ──"
@@ -1114,17 +1137,48 @@ run_verify() {
     sudo fail2ban-client status sshd || true
 
     echo
+    log_info "── logwatch cron ──"
+    [[ -f /etc/cron.daily/00logwatch ]] && log_ok "logwatch cron present" || warn "logwatch cron not found"
+
+    echo
+    log_info "── Unattended-upgrades config ──"
+    local uu50="/etc/apt/apt.conf.d/50unattended-upgrades"
+    grep -qF '${distro_codename}-updates' "$uu50" && log_ok "-updates origin enabled" || warn "-updates origin not enabled"
+    grep -qF 'Docker CE' "$uu50" && log_ok "Docker origin enabled" || warn "Docker origin not enabled"
+
+    echo
+    log_info "── needrestart mode ──"
+    local nr_conf="/etc/needrestart/needrestart.conf"
+    if [[ -f "$nr_conf" ]]; then
+        grep -qF "\$nrconf{restart} = 'a'" "$nr_conf" && log_ok "needrestart set to automatic" || warn "needrestart not set to automatic"
+    else
+        warn "needrestart config not found"
+    fi
+
+    echo
     log_info "── auditd rule count ──"
     sudo auditctl -l 2>/dev/null | wc -l || true
 
     echo
-    log_info "── Docker logging driver ──"
+    log_info "── Docker configuration ──"
     # docker group membership may not apply in current session — fall back to sudo
     local drv
     drv=$(docker info --format '{{.LoggingDriver}}' 2>/dev/null \
         || sudo docker info --format '{{.LoggingDriver}}' 2>/dev/null \
         || echo "unavailable")
     echo "  logging driver: $drv"
+    [[ "$drv" == "local" ]] || warn "Docker log driver is '$drv', expected 'local'"
+    
+    log_info "  docker-prune timer:"
+    systemctl list-timers docker-prune.timer 2>/dev/null | grep -v "NEXT\|timer" || warn "docker-prune.timer not active"
+
+    echo
+    log_info "── Postfix status ──"
+    sudo systemctl is-active postfix &>/dev/null && log_ok "postfix is active" || warn "postfix is not active"
+
+    echo
+    log_info "── Restic installation ──"
+    command -v restic &>/dev/null && log_ok "restic installed: $(restic version 2>/dev/null | head -1)" || warn "restic not installed"
 
     echo
     log_info "── Memory & disk ──"
@@ -1139,9 +1193,11 @@ run_verify() {
     log_info "── Per-interface rp_filter ──"
     local iface
     iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
-    [[ -n "$iface" ]] \
-        && sysctl "net.ipv4.conf.${iface}.rp_filter" \
-        || log_warn "Could not detect primary interface"
+    if [[ -n "$iface" ]]; then
+        sysctl "net.ipv4.conf.${iface}.rp_filter" || warn "Could not read rp_filter for $iface"
+    else
+        warn "Could not detect primary interface for rp_filter check"
+    fi
 
     echo
     log_info "── World-writable files (review any results) ──"
@@ -1157,17 +1213,21 @@ run_verify() {
 
     echo
     log_info "── Credential file checks ──"
-    sudo test -f /etc/postfix/sasl_passwd \
-        && log_error "WARNING: /etc/postfix/sasl_passwd exists — must not be present in snapshot" \
-        || log_ok "/etc/postfix/sasl_passwd absent"
-    sudo test -f /etc/restic/env \
-        && log_error "WARNING: /etc/restic/env exists — must not be present in snapshot" \
-        || log_ok "/etc/restic/env absent"
+    if sudo test -f /etc/postfix/sasl_passwd; then
+        warn "/etc/postfix/sasl_passwd exists — must not be present in snapshot"
+    else
+        log_ok "/etc/postfix/sasl_passwd absent"
+    fi
+    if sudo test -f /etc/restic/env; then
+        warn "/etc/restic/env exists — must not be present in snapshot"
+    else
+        log_ok "/etc/restic/env absent"
+    fi
     local env_files
     env_files=$(sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 \
         | xargs -0 -r ls -la 2>/dev/null || true)
     if [[ -n "$env_files" ]]; then
-        log_warn "Env files found in /opt — review:"
+        warn "Env files found in /opt"
         echo "$env_files"
     else
         log_ok "No env files found in /opt"
@@ -1175,7 +1235,12 @@ run_verify() {
 
     echo
     log_info "── Private key file scan (/root and /home) ──"
-    sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true
+    local priv_keys
+    priv_keys=$(sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true)
+    if [[ -n "$priv_keys" ]]; then
+        warn "Private key files found"
+        echo "$priv_keys"
+    fi
 }
 
 # =============================================================================
