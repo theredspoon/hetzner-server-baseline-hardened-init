@@ -1110,7 +1110,14 @@ run_verify() {
     grep -qE "^PasswordAuthentication no" "$sshd_cfg" && log_ok "PasswordAuthentication no" || warn "PasswordAuthentication not set to no"
     grep -qE "^AllowTcpForwarding yes" "$sshd_cfg" && log_ok "AllowTcpForwarding yes" || warn "AllowTcpForwarding not set to yes"
     grep -qE "^MaxAuthTries 3" "$sshd_cfg" && log_ok "MaxAuthTries 3" || warn "MaxAuthTries not set to 3"
-    grep -qE "^AllowUsers" "$sshd_cfg" && log_ok "AllowUsers directive present" || warn "AllowUsers not set"
+    if awk -v u="$USERNAME" '
+          $1 == "AllowUsers" { for (i=2; i<=NF; i++) if ($i == u) found=1 }
+          END { exit(found ? 0 : 1) }
+        ' "$sshd_cfg"; then
+        log_ok "AllowUsers includes $USERNAME"
+    else
+        warn "AllowUsers does not include $USERNAME"
+    fi
 
     echo
     log_info "── AppArmor status ──"
@@ -1143,8 +1150,58 @@ run_verify() {
     echo
     log_info "── Unattended-upgrades config ──"
     local uu50="/etc/apt/apt.conf.d/50unattended-upgrades"
-    grep -qF '${distro_codename}-updates' "$uu50" && log_ok "-updates origin enabled" || warn "-updates origin not enabled"
+    local uu51="/etc/apt/apt.conf.d/51unattended-upgrades-local"
+    
+    # Check -updates origin is uncommented (active)
+    if grep -qE '^[[:space:]]*"[^"#/]*\$\{distro_codename\}-updates"' "$uu50" 2>/dev/null; then
+        log_ok "-updates origin enabled"
+    else
+        warn "-updates origin not enabled (check for commented line)"
+    fi
+    
+    # Check Docker origin
     grep -qF 'Docker CE' "$uu50" && log_ok "Docker origin enabled" || warn "Docker origin not enabled"
+    
+    # Check cleanup settings
+    log_info "  Cleanup & reboot settings:"
+    grep -q 'Remove-Unused-Kernel-Packages.*"true"' "$uu51" 2>/dev/null \
+        && log_ok "  Remove-Unused-Kernel-Packages true" \
+        || warn "  Remove-Unused-Kernel-Packages not set to true"
+    grep -q 'Remove-New-Unused-Dependencies.*"true"' "$uu51" 2>/dev/null \
+        && log_ok "  Remove-New-Unused-Dependencies true" \
+        || warn "  Remove-New-Unused-Dependencies not set to true"
+    grep -q 'Remove-Unused-Dependencies.*"true"' "$uu51" 2>/dev/null \
+        && log_ok "  Remove-Unused-Dependencies true" \
+        || warn "  Remove-Unused-Dependencies not set to true"
+    
+    # Check reboot settings
+    grep -q 'Automatic-Reboot.*"true"' "$uu51" 2>/dev/null \
+        && log_ok "  Automatic-Reboot true" \
+        || warn "  Automatic-Reboot not set to true"
+    grep -q 'Automatic-Reboot-Time.*"03:00"' "$uu51" 2>/dev/null \
+        && log_ok "  Automatic-Reboot-Time 03:00" \
+        || warn "  Automatic-Reboot-Time not set to 03:00"
+    grep -qF 'Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";' "$uu51" \
+        && log_ok "Remove-Unused-Kernel-Packages enabled" \
+        || warn "Remove-Unused-Kernel-Packages not enabled"
+    grep -qF 'Unattended-Upgrade::Remove-New-Unused-Dependencies "true";' "$uu51" \
+        && log_ok "Remove-New-Unused-Dependencies enabled" \
+        || warn "Remove-New-Unused-Dependencies not enabled"
+    grep -qF 'Unattended-Upgrade::Remove-Unused-Dependencies "true";' "$uu51" \
+        && log_ok "Remove-Unused-Dependencies enabled" \
+        || warn "Remove-Unused-Dependencies not enabled"
+    grep -qF 'Unattended-Upgrade::Automatic-Reboot "true";' "$uu51" \
+        && log_ok "Automatic-Reboot enabled" \
+        || warn "Automatic-Reboot not enabled"
+    grep -qF 'Unattended-Upgrade::Automatic-Reboot-Time "03:00";' "$uu51" \
+        && log_ok "Automatic-Reboot-Time set to 03:00" \
+        || warn "Automatic-Reboot-Time not set to 03:00"
+    grep -qF 'Unattended-Upgrade::Mail "root";' "$uu51" \
+        && log_ok 'Unattended-Upgrade::Mail set to "root"' \
+        || warn 'Unattended-Upgrade::Mail not set to "root"'
+    grep -qF 'Unattended-Upgrade::MailOnlyOnError "true";' "$uu51" \
+        && log_ok "MailOnlyOnError enabled" \
+        || warn "MailOnlyOnError not enabled"
 
     echo
     log_info "── needrestart mode ──"
@@ -1324,16 +1381,18 @@ main() {
         # Check if there were warnings during verify
         if [[ ${#WARNINGS[@]} -gt 0 ]]; then
             echo
-            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            log_warn "Verification found ${#WARNINGS[@]} warning(s) — review above"
-            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
-            [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Fix issues and retry."
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_error "SNAPSHOT BLOCKED: Verification found ${#WARNINGS[@]} warning(s)"
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            for warning in "${WARNINGS[@]}"; do
+                log_error "  - $warning"
+            done
+            die "Snapshot verification failed — fix the issues above and retry."
         fi
         
         log_ok "Verification passed"
         
-        # Run hygiene - prompts on credential issues
+        # Run hygiene - hard-fails on credential issues
         run_hygiene
         
         # Trigger snapshot via API
