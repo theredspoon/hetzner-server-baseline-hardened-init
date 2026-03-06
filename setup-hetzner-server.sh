@@ -1121,10 +1121,20 @@ run_verify() {
 
     echo
     log_info "── AppArmor status ──"
+    if sudo systemctl is-active --quiet apparmor; then
+        log_ok "AppArmor is active"
+    else
+        warn "AppArmor is not active"
+    fi
     sudo systemctl --no-pager status apparmor || true
 
     echo
     log_info "── apt timers ──"
+    if systemctl list-timers --all 2>/dev/null | grep -q 'apt-daily'; then
+        log_ok "apt timers present"
+    else
+        warn "apt timers not found"
+    fi
     systemctl list-timers | grep apt || true
 
     echo
@@ -1141,6 +1151,11 @@ run_verify() {
 
     echo
     log_info "── Fail2ban sshd jail ──"
+    if sudo fail2ban-client status sshd >/dev/null 2>&1; then
+        log_ok "fail2ban sshd jail is active"
+    else
+        warn "fail2ban sshd jail is not active"
+    fi
     sudo fail2ban-client status sshd || true
 
     echo
@@ -1213,8 +1228,20 @@ run_verify() {
     fi
 
     echo
-    log_info "── auditd rule count ──"
-    sudo auditctl -l 2>/dev/null | wc -l || true
+    log_info "── auditd status ──"
+    if sudo systemctl is-active --quiet auditd; then
+        log_ok "auditd is active"
+    else
+        warn "auditd is not active"
+    fi
+    local audit_rule_count
+    audit_rule_count=$(sudo auditctl -l 2>/dev/null | wc -l || echo "0")
+    echo "  audit rule count: $audit_rule_count"
+    if [[ "$audit_rule_count" =~ ^[0-9]+$ ]] && (( audit_rule_count > 0 )); then
+        log_ok "auditd rules loaded"
+    else
+        warn "auditd rules not loaded or unreadable"
+    fi
 
     echo
     log_info "── Docker configuration ──"
@@ -1244,14 +1271,36 @@ run_verify() {
 
     echo
     log_info "── sysctl hardening values ──"
-    sysctl net.ipv4.tcp_syncookies fs.suid_dumpable || true
+    local syncookies suid_dumpable
+    syncookies=$(sysctl -n net.ipv4.tcp_syncookies 2>/dev/null || echo "error")
+    suid_dumpable=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "error")
+    echo "  net.ipv4.tcp_syncookies = $syncookies"
+    echo "  fs.suid_dumpable = $suid_dumpable"
+    [[ "$syncookies" == "1" ]] || warn "net.ipv4.tcp_syncookies = $syncookies, expected 1"
+    [[ "$suid_dumpable" == "0" ]] || warn "fs.suid_dumpable = $suid_dumpable, expected 0"
 
     echo
     log_info "── Per-interface rp_filter ──"
     local iface
     iface=$(ip route 2>/dev/null | awk '/default/{print $5; exit}')
     if [[ -n "$iface" ]]; then
-        sysctl "net.ipv4.conf.${iface}.rp_filter" || warn "Could not read rp_filter for $iface"
+        local rp_filter
+        rp_filter=$(sysctl -n "net.ipv4.conf.${iface}.rp_filter" 2>/dev/null || echo "error")
+        echo "  net.ipv4.conf.${iface}.rp_filter = $rp_filter"
+        case "$rp_filter" in
+            1)
+                log_ok "Primary interface rp_filter is strict (1)"
+                ;;
+            2)
+                warn "net.ipv4.conf.${iface}.rp_filter = 2 (loose mode). Acceptable only when intentional multi-path routing is configured, such as Tailscale."
+                ;;
+            0)
+                warn "net.ipv4.conf.${iface}.rp_filter = 0, expected 1 for the base image and never 0"
+                ;;
+            *)
+                warn "net.ipv4.conf.${iface}.rp_filter = $rp_filter, expected 1 for the base image or 2 only for intentional multi-path routing"
+                ;;
+        esac
     else
         warn "Could not detect primary interface for rp_filter check"
     fi

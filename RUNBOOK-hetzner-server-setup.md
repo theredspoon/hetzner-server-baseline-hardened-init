@@ -520,6 +520,10 @@ sysctl net.ipv4.tcp_syncookies fs.suid_dumpable
 # Should return 1 (tcp_syncookies) and 0 (suid_dumpable)
 ```
 
+For reverse path filtering, the base image target is strict mode (`1`). On a plain single-homed Hetzner VPS, the primary interface should normally return `1`.
+
+If Tailscale, subnet routing, policy routing, multiple interfaces, or other intentional multi-path networking is added later, loose mode (`2`) may be acceptable on the active interface. Disabled mode (`0`) is not acceptable.
+
 ---
 
 ## 11. Outbound Email Alerting — postfix relay
@@ -609,7 +613,9 @@ free -h
 df -h
 sudo find / -xdev -type f -perm -0002 2>/dev/null
 sysctl net.ipv4.conf.$(ip route | awk '/default/{print $5; exit}').rp_filter
-# Should return 1 — confirms rp_filter applies to the primary interface, not just the defaults
+# Base image target: 1
+# 2 is acceptable only when intentional multi-path routing exists (for example Tailscale or other advanced networking)
+# 0 is not acceptable
 sudo systemctl list-unit-files --state=enabled
 # Review for unexpected enabled services before freezing image
 ```
