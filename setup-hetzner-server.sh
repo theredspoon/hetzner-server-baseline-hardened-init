@@ -9,13 +9,13 @@
 #
 # Usage:
 #   ./setup-hetzner-server.sh <username> [swap_size_gb]
-#   ./setup-hetzner-server.sh <username> --verify      # validation only
-#   ./setup-hetzner-server.sh <username> --snapshot    # verify + hygiene + snapshot
+#   ./setup-hetzner-server.sh <username> --verify              # validation only
+#   ./setup-hetzner-server.sh <username> --snapshot <name>     # verify + hygiene + snapshot
 #
 # Examples:
 #   ./setup-hetzner-server.sh finless1strepair 2
 #   ./setup-hetzner-server.sh finless1strepair --verify
-#   HCLOUD_TOKEN=<token> ./setup-hetzner-server.sh finless1strepair --snapshot
+#   HCLOUD_TOKEN=<token> ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-baseline-20260306
 #
 # The script is idempotent — safe to re-run after a reboot or partial failure.
 # =============================================================================
@@ -29,16 +29,23 @@ USERNAME="${1:-}"
 SWAP_GB="2"
 VERIFY_ONLY=false
 SNAPSHOT_MODE=false
+SNAPSHOT_NAME=""
 
 if [[ $# -ge 2 ]]; then
     if [[ "$2" == "--verify" ]]; then
         VERIFY_ONLY=true
     elif [[ "$2" == "--snapshot" ]]; then
         SNAPSHOT_MODE=true
+        if [[ -z "${3:-}" ]]; then
+            echo "Usage: $0 <username> --snapshot <snapshot-name>" >&2
+            echo "Error: --snapshot requires a snapshot name" >&2
+            exit 1
+        fi
+        SNAPSHOT_NAME="$3"
     elif [[ "$2" =~ ^[0-9]+$ ]]; then
         SWAP_GB="$2"
     else
-        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot]" >&2
+        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>]" >&2
         exit 1
     fi
 fi
@@ -128,18 +135,18 @@ run_hygiene() {
     log_ok "Random seed removed"
 
     log_info "Checking for credential files that should not be in snapshot..."
-    local warnings=0
+    local issues=()
     
     if sudo test -f /etc/postfix/sasl_passwd; then
-        warn "/etc/postfix/sasl_passwd exists — must NOT be in snapshot"
-        ((warnings++))
+        issues+=("/etc/postfix/sasl_passwd exists — must NOT be in snapshot")
+        log_error "/etc/postfix/sasl_passwd exists — must NOT be in snapshot"
     else
         log_ok "/etc/postfix/sasl_passwd absent"
     fi
     
     if sudo test -f /etc/restic/env; then
-        warn "/etc/restic/env exists — must NOT be in snapshot"
-        ((warnings++))
+        issues+=("/etc/restic/env exists — must NOT be in snapshot")
+        log_error "/etc/restic/env exists — must NOT be in snapshot"
     else
         log_ok "/etc/restic/env absent"
     fi
@@ -147,9 +154,9 @@ run_hygiene() {
     local env_files
     env_files=$(sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 2>/dev/null | xargs -0 -r ls -la 2>/dev/null || true)
     if [[ -n "$env_files" ]]; then
-        warn "Env files found in /opt — review before snapshot:"
-        echo "$env_files"
-        ((warnings++))
+        issues+=("Env files found in /opt — remove before snapshot")
+        log_error "Env files found in /opt:"
+        echo "$env_files" | while read -r line; do log_error "  $line"; done
     else
         log_ok "No env files in /opt"
     fi
@@ -157,15 +164,20 @@ run_hygiene() {
     local priv_keys
     priv_keys=$(sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true)
     if [[ -n "$priv_keys" ]]; then
-        warn "Private key files found — review before snapshot:"
-        echo "$priv_keys"
-        ((warnings++))
+        issues+=("Private key files found — remove before snapshot")
+        log_error "Private key files found:"
+        echo "$priv_keys" | while read -r line; do log_error "  $line"; done
     else
         log_ok "No private key files in /root or /home"
     fi
 
-    if [[ $warnings -gt 0 ]]; then
-        die "Snapshot hygiene found $warnings warning(s). Aborting snapshot. Clean up credential files first."
+    if [[ ${#issues[@]} -gt 0 ]]; then
+        echo
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_error "SNAPSHOT BLOCKED: Found ${#issues[@]} issue(s)"
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_error "Fix the above issues, then re-run with --snapshot."
+        exit 1
     fi
 
     log_ok "Snapshot hygiene complete — server ready for snapshot"
@@ -197,14 +209,13 @@ trigger_snapshot() {
     fi
     log_ok "Server ID: $server_id"
 
-    # Generate snapshot label
-    local snapshot_label
-    snapshot_label="$(hostname)-$(date +%Y%m%d)"
-    log_info "Snapshot label: $snapshot_label"
+    # Use provided snapshot name
+    log_info "Snapshot name: $SNAPSHOT_NAME"
 
     # Confirm before proceeding
     echo
     echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${YELLOW}  SNAPSHOT: $SNAPSHOT_NAME${RESET}"
     echo -e "${YELLOW}  WARNING: Server will POWER OFF for snapshot${RESET}"
     echo -e "${YELLOW}  SSH session will disconnect${RESET}"
     echo -e "${YELLOW}  Server will restart automatically when complete${RESET}"
@@ -222,7 +233,7 @@ trigger_snapshot() {
         -H "Authorization: Bearer $HCLOUD_TOKEN" \
         -H "Content-Type: application/json" \
         -X POST \
-        -d "{\"description\": \"$snapshot_label\", \"type\": \"snapshot\", \"labels\": {\"created\": \"$(date +%Y-%m-%d)\"}}" \
+        -d "{\"description\": \"$SNAPSHOT_NAME\", \"type\": \"snapshot\", \"labels\": {\"created\": \"$(date +%Y-%m-%d)\"}}" \
         "https://api.hetzner.cloud/v1/servers/$server_id/actions/create_image" 2>&1) || {
         die "Failed to initiate snapshot. Check HCLOUD_TOKEN and server ID.\nResponse: $response"
     }
@@ -240,7 +251,7 @@ trigger_snapshot() {
 # --- Preflight checks --------------------------------------------------------
 
 preflight() {
-    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb|--verify|--snapshot]"
+    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>]"
     [[ "$EUID" -eq 0 ]] && die "Run as the non-root sudo user, not root directly."
     [[ "$(whoami)" == "$USERNAME" ]] \
         || die "Run this script as '$USERNAME', not as '$(whoami)'. Switch users first."
@@ -1184,24 +1195,24 @@ main() {
         log_section "SNAPSHOT MODE"
         log_info "Running verification checks before snapshot..."
         
-        # Run verify but capture if there are issues
-        WARNINGS=()
-        if ! run_verify 2>&1 | tee /tmp/verify_output.log; then
-            die "Verification checks failed. Review output above. Fix issues before snapshot."
-        fi
+        # Run verify - any issues will be displayed, then we check for warnings
+        run_verify
         
-        # Check if there were warnings in verify output
-        if grep -q "WARNING\|ERROR\|✗" /tmp/verify_output.log 2>/dev/null; then
+        # Check for any warnings recorded during verify
+        if [[ ${#WARNINGS[@]} -gt 0 ]]; then
             echo
-            log_warn "Verification found issues (see above). Review before proceeding."
-            read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
-            [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Fix issues and retry."
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_error "VERIFICATION FAILED: ${#WARNINGS[@]} warning(s) found"
+            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            for w in "${WARNINGS[@]}"; do
+                log_error "  - $w"
+            done
+            die "Fix the above issues before taking a snapshot."
         fi
         
-        rm -f /tmp/verify_output.log
         log_ok "Verification passed"
         
-        # Run hygiene
+        # Run hygiene - will exit if credential issues found
         run_hygiene
         
         # Trigger snapshot via API
