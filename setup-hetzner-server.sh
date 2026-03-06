@@ -64,7 +64,7 @@ log_ok()      { echo -e "${GREEN}  ✓${RESET} $*"; }
 log_warn()    { echo -e "${YELLOW}  ⚠${RESET} $*"; }
 log_error()   { echo -e "${RED}  ✗${RESET} $*" >&2; }
 log_section() { echo -e "\n${BOLD}${BLUE}── $* ──${RESET}"; }
-die()         { log_error "$*"; exit 1; }
+die()         { log_error "$*"; cleanup_change_tracking; exit 1; }
 
 # Track warnings for summary
 WARNINGS=()
@@ -227,12 +227,7 @@ trigger_snapshot() {
         die "Snapshot cancelled by user"
     fi
 
-    # Delete self before snapshot (script runs from memory)
-    log_info "Removing setup script before snapshot..."
-    rm -f "$0"
-    log_ok "Script removed"
-
-    # Trigger snapshot via API
+    # Trigger snapshot via API first
     log_info "Initiating snapshot via Hetzner API..."
     local response http_code
     response=$(curl -sSL \
@@ -270,6 +265,12 @@ trigger_snapshot() {
             die "Failed to initiate snapshot (HTTP $http_code).\nResponse: $response"
             ;;
     esac
+    
+    # Only delete script after API call succeeds
+    log_info "Removing setup script before server powers off..."
+    rm -f "$0"
+    log_ok "Script removed"
+    
     log_info "Server will power off, create snapshot, then restart."
     log_info "Monitor progress in Hetzner Cloud Console."
     
@@ -1246,8 +1247,8 @@ main() {
             die "API token is required for snapshot mode"
         fi
         
-        # Clear token from memory after use (set in subshell that will exit)
-        trap 'unset HCLOUD_TOKEN 2>/dev/null || true' EXIT
+        # Clear token from memory after use, also ensure cleanup on exit
+        trap 'unset HCLOUD_TOKEN 2>/dev/null; cleanup_change_tracking 2>/dev/null || true' EXIT
         
         log_info "Running verification checks before snapshot..."
         
@@ -1277,7 +1278,10 @@ main() {
     fi
 
     init_change_tracking
-
+    
+    # Ensure cleanup on interrupt or termination
+    trap 'log_warn "Interrupted - cleaning up..."; cleanup_change_tracking; exit 130' INT TERM
+    
     s3_ssh_hardening
     s4_package_updates
     s5_firewall
