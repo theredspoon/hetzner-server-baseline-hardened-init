@@ -9,13 +9,13 @@
 #
 # Usage:
 #   ./setup-hetzner-server.sh <username> [swap_size_gb]
-#   ./setup-hetzner-server.sh <username> --verify              # validation only
-#   ./setup-hetzner-server.sh <username> --snapshot <name>     # verify + hygiene + snapshot
+#   ./setup-hetzner-server.sh <username> --verify                      # validation only
+#   ./setup-hetzner-server.sh <username> --snapshot <name> <api-token> # verify + hygiene + snapshot
 #
 # Examples:
 #   ./setup-hetzner-server.sh finless1strepair 2
 #   ./setup-hetzner-server.sh finless1strepair --verify
-#   HCLOUD_TOKEN=<token> ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-baseline-20260306
+#   ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-baseline-20260306 <api-token>
 #
 # The script is idempotent — safe to re-run after a reboot or partial failure.
 # =============================================================================
@@ -30,6 +30,7 @@ SWAP_GB="2"
 VERIFY_ONLY=false
 SNAPSHOT_MODE=false
 SNAPSHOT_NAME=""
+HCLOUD_TOKEN=""
 
 if [[ $# -ge 2 ]]; then
     if [[ "$2" == "--verify" ]]; then
@@ -37,15 +38,21 @@ if [[ $# -ge 2 ]]; then
     elif [[ "$2" == "--snapshot" ]]; then
         SNAPSHOT_MODE=true
         if [[ -z "${3:-}" ]]; then
-            echo "Usage: $0 <username> --snapshot <snapshot-name>" >&2
-            echo "Error: --snapshot requires a snapshot name" >&2
+            echo "Usage: $0 <username> --snapshot <snapshot-name> <api-token>" >&2
+            echo "Error: --snapshot requires a snapshot name and API token" >&2
+            exit 1
+        fi
+        if [[ -z "${4:-}" ]]; then
+            echo "Usage: $0 <username> --snapshot <snapshot-name> <api-token>" >&2
+            echo "Error: --snapshot requires an API token" >&2
             exit 1
         fi
         SNAPSHOT_NAME="$3"
+        HCLOUD_TOKEN="$4"
     elif [[ "$2" =~ ^[0-9]+$ ]]; then
         SWAP_GB="$2"
     else
-        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>]" >&2
+        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name> <api-token>]" >&2
         exit 1
     fi
 fi
@@ -235,7 +242,7 @@ trigger_snapshot() {
         -X POST \
         -d "{\"description\": \"$SNAPSHOT_NAME\", \"type\": \"snapshot\", \"labels\": {\"created\": \"$(date +%Y-%m-%d)\"}}" \
         "https://api.hetzner.cloud/v1/servers/$server_id/actions/create_image" 2>&1) || {
-        die "Failed to initiate snapshot. Check HCLOUD_TOKEN and server ID.\nResponse: $response"
+        die "Failed to initiate snapshot. Check API token and server ID.\nResponse: $response"
     }
 
     log_ok "Snapshot initiated successfully!"
@@ -251,7 +258,7 @@ trigger_snapshot() {
 # --- Preflight checks --------------------------------------------------------
 
 preflight() {
-    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name>]"
+    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb|--verify|--snapshot <name> <api-token>]"
     [[ "$EUID" -eq 0 ]] && die "Run as the non-root sudo user, not root directly."
     [[ "$(whoami)" == "$USERNAME" ]] \
         || die "Run this script as '$USERNAME', not as '$(whoami)'. Switch users first."
@@ -1193,11 +1200,6 @@ main() {
 
     if [[ "$SNAPSHOT_MODE" == true ]]; then
         log_section "SNAPSHOT MODE"
-        
-        # Check for API token FIRST (before any destructive operations)
-        if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
-            die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens\n       Required permissions: Read & Write"
-        fi
         
         log_info "Running verification checks before snapshot..."
         
