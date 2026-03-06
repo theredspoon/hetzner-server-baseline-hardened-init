@@ -189,11 +189,6 @@ run_hygiene() {
 trigger_snapshot() {
     log_section "Hetzner Snapshot"
 
-    # Check for API token
-    if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
-        die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens"
-    fi
-
     # Check for jq (needed to parse metadata)
     if ! command -v jq &>/dev/null; then
         die "jq is required for snapshot mode. Install with: sudo apt install jq"
@@ -1198,6 +1193,12 @@ main() {
 
     if [[ "$SNAPSHOT_MODE" == true ]]; then
         log_section "SNAPSHOT MODE"
+        
+        # Check for API token FIRST (before any destructive operations)
+        if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
+            die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens"
+        fi
+        
         log_info "Running verification checks before snapshot..."
         
         # Run verify but capture if there are issues
