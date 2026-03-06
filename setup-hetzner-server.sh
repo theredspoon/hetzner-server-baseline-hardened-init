@@ -1309,7 +1309,13 @@ run_verify() {
     [[ "$drv" == "local" ]] || warn "Docker log driver is '$drv', expected 'local'"
     
     log_info "  docker-prune timer:"
-    systemctl list-timers docker-prune.timer 2>/dev/null | grep -v "NEXT\|timer" || warn "docker-prune.timer not active"
+    local docker_prune_timer
+    docker_prune_timer=$(systemctl list-timers docker-prune.timer --no-pager 2>/dev/null | sed '/^$/d')
+    if [[ -n "$docker_prune_timer" ]] && grep -q "docker-prune.timer" <<< "$docker_prune_timer"; then
+        echo "$docker_prune_timer"
+    else
+        warn "docker-prune.timer not active"
+    fi
 
     echo
     log_info "── Postfix status ──"
@@ -1412,6 +1418,8 @@ run_verify() {
     if [[ -n "$priv_keys" ]]; then
         warn "Private key files found"
         echo "$priv_keys"
+    else
+        log_ok "No private key files found in /root or /home"
     fi
 }
 

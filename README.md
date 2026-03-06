@@ -3,17 +3,20 @@
 Runbook and automation for turning a fresh Hetzner Ubuntu 24.04 server into a hardened, reusable baseline snapshot for later application deployment.
 
 Target:
+
 - Ubuntu 24.04 LTS
 - Fresh Hetzner Cloud VPS
 - Single-operator server baseline
 
 This repo contains:
+
 - [`RUNBOOK-hetzner-server-setup.md`](/Users/nim/Projects/hetzner-server-hardened-init/RUNBOOK-hetzner-server-setup.md): full manual procedure and rationale
 - [`setup-hetzner-server.sh`](/Users/nim/Projects/hetzner-server-hardened-init/setup-hetzner-server.sh): automation for runbook sections 3–12 plus verification and snapshot workflow
 
 ## What The Script Does
 
 The script automates:
+
 - SSH hardening, including `AllowUsers`, root-password lock, and VS Code-compatible SSH tunneling settings
 - package updates, unattended-upgrades, Docker origin, and `needrestart`
 - UFW and fail2ban
@@ -28,6 +31,7 @@ The script automates:
 - snapshot hygiene and Hetzner API-based snapshot creation
 
 The script does not automate:
+
 - initial root access and rescue-console recovery
 - creation of the non-root sudo user
 - application deployment
@@ -38,11 +42,13 @@ The script does not automate:
 ## Before You Run It
 
 Complete runbook sections 1–2 first:
+
 1. Create the server and establish SSH access.
 2. Create a non-root user and add it to the `sudo` group.
 3. Confirm you can log in as that non-root user and run `sudo`.
 
 Important constraints:
+
 - Run the script as the non-root sudo user, not `root`.
 - The first positional argument must be that same username.
 - The script is idempotent, so re-running is expected after reboots or partial completion.
@@ -103,6 +109,7 @@ On a fresh server:
 ```
 
 During the run, expect:
+
 - a sudo password prompt if sudo credentials are not cached
 - package upgrades
 - SSH restart after config validation
@@ -112,6 +119,7 @@ During the run, expect:
 If the script detects a kernel update requiring reboot, it stops after printing a reboot gate. Reboot the server, reconnect, and run the same command again.
 
 After the first full run:
+
 1. Log out and back in so Docker group membership applies.
 2. Set timezone to UTC if not already set:
 
@@ -134,6 +142,7 @@ sudo timedatectl set-timezone UTC
 ## What `--verify` Does
 
 `--verify` is read-only. It checks or prints:
+
 - timezone and hostname
 - time sync status
 - SSH directives and `AllowUsers`
@@ -148,18 +157,21 @@ sudo timedatectl set-timezone UTC
 - world-writable files on `/`
 
 Behavior:
+
 - `--verify` reports warnings but does not change system state.
 - `--snapshot` runs `--verify` internally and hard-fails if any warnings are present.
 
 ## What `--snapshot` Does
 
 `--snapshot <name>` performs:
+
 1. verification
 2. snapshot hygiene
 3. interactive API token prompt
 4. Hetzner API call to create a snapshot
 
 Snapshot mode will block if:
+
 - verification produced warnings
 - forbidden files are found during hygiene
 - the snapshot name is invalid
@@ -167,11 +179,13 @@ Snapshot mode will block if:
 - the Hetzner API rejects the request
 
 Snapshot mode expects:
+
 - you are running on the target Hetzner server
 - `jq` is available
 - your Hetzner API token has Read & Write permissions
 
 During snapshot hygiene, the script:
+
 - clears shell history
 - clears apt caches
 - prunes Docker builder cache
@@ -184,12 +198,15 @@ After the API call succeeds, the script deletes itself and the server powers off
 ## `rp_filter` Policy
 
 Baseline expectation:
+
 - primary interface `rp_filter = 1`
 
 Allowed exception:
+
 - `rp_filter = 2` only when intentional multi-path routing exists, for example Tailscale, subnet routing, multiple interfaces, or policy routing
 
 Never acceptable:
+
 - `rp_filter = 0`
 
 If the host intentionally uses multi-path routing, use:
@@ -204,6 +221,7 @@ If the host intentionally uses multi-path routing, use:
 The script is designed to be re-run safely.
 
 Examples:
+
 - If the server reboots after package upgrades, re-run the same setup command.
 - If some packages were already installed, the script skips them.
 - If config files already match the expected state, the script leaves them unchanged.
@@ -214,6 +232,7 @@ The script also records changed files during setup and prints a diff-style chang
 ## Post-Snapshot Expectations
 
 The baseline snapshot must not include:
+
 - `/etc/postfix/sasl_passwd`
 - `/etc/restic/env`
 - application secrets
