@@ -10,10 +10,12 @@
 # Usage:
 #   ./setup-hetzner-server.sh <username> [swap_size_gb]
 #   ./setup-hetzner-server.sh <username> --verify      # validation only
+#   ./setup-hetzner-server.sh <username> --snapshot    # verify + hygiene + snapshot
 #
 # Examples:
 #   ./setup-hetzner-server.sh finless1strepair 2
 #   ./setup-hetzner-server.sh finless1strepair --verify
+#   HCLOUD_TOKEN=<token> ./setup-hetzner-server.sh finless1strepair --snapshot
 #
 # The script is idempotent — safe to re-run after a reboot or partial failure.
 # =============================================================================
@@ -26,14 +28,17 @@ IFS=$'\n\t'
 USERNAME="${1:-}"
 SWAP_GB="2"
 VERIFY_ONLY=false
+SNAPSHOT_MODE=false
 
 if [[ $# -ge 2 ]]; then
     if [[ "$2" == "--verify" ]]; then
         VERIFY_ONLY=true
+    elif [[ "$2" == "--snapshot" ]]; then
+        SNAPSHOT_MODE=true
     elif [[ "$2" =~ ^[0-9]+$ ]]; then
         SWAP_GB="$2"
     else
-        echo "Usage: $0 <username> [swap_size_gb|--verify]" >&2
+        echo "Usage: $0 <username> [swap_size_gb|--verify|--snapshot]" >&2
         exit 1
     fi
 fi
@@ -91,10 +96,151 @@ cleanup_change_tracking() {
     fi
 }
 
+# =============================================================================
+# SNAPSHOT HYGIENE — Section 14 cleanup
+# =============================================================================
+run_hygiene() {
+    log_section "Snapshot Hygiene"
+
+    log_info "Clearing shell history..."
+    history -c || true
+    sudo sh -c 'history -c' || true
+    sudo rm -f /root/.bash_history
+    sudo rm -f "/home/$USERNAME/.bash_history"
+    log_ok "Shell history cleared"
+
+    log_info "Clearing apt cache..."
+    sudo apt clean || true
+    sudo rm -rf /var/lib/apt/lists/*
+    log_ok "Apt cache cleared"
+
+    log_info "Clearing Docker build cache..."
+    docker builder prune -f 2>/dev/null || sudo docker builder prune -f 2>/dev/null || true
+    log_ok "Docker build cache cleared"
+
+    log_info "Regenerating machine-id for template image..."
+    sudo rm -f /etc/machine-id
+    sudo systemd-machine-id-setup
+    log_ok "Machine-id regenerated (will be unique on next boot)"
+
+    log_info "Removing random seed..."
+    sudo rm -f /var/lib/systemd/random-seed
+    log_ok "Random seed removed"
+
+    log_info "Checking for credential files that should not be in snapshot..."
+    local warnings=0
+    
+    if sudo test -f /etc/postfix/sasl_passwd; then
+        warn "/etc/postfix/sasl_passwd exists — must NOT be in snapshot"
+        ((warnings++))
+    else
+        log_ok "/etc/postfix/sasl_passwd absent"
+    fi
+    
+    if sudo test -f /etc/restic/env; then
+        warn "/etc/restic/env exists — must NOT be in snapshot"
+        ((warnings++))
+    else
+        log_ok "/etc/restic/env absent"
+    fi
+    
+    local env_files
+    env_files=$(sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 2>/dev/null | xargs -0 -r ls -la 2>/dev/null || true)
+    if [[ -n "$env_files" ]]; then
+        warn "Env files found in /opt — review before snapshot:"
+        echo "$env_files"
+        ((warnings++))
+    else
+        log_ok "No env files in /opt"
+    fi
+    
+    local priv_keys
+    priv_keys=$(sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true)
+    if [[ -n "$priv_keys" ]]; then
+        warn "Private key files found — review before snapshot:"
+        echo "$priv_keys"
+        ((warnings++))
+    else
+        log_ok "No private key files in /root or /home"
+    fi
+
+    if [[ $warnings -gt 0 ]]; then
+        die "Snapshot hygiene found $warnings warning(s). Aborting snapshot. Clean up credential files first."
+    fi
+
+    log_ok "Snapshot hygiene complete — server ready for snapshot"
+}
+
+# =============================================================================
+# HETZNER SNAPSHOT — Trigger via API
+# =============================================================================
+trigger_snapshot() {
+    log_section "Hetzner Snapshot"
+
+    # Check for API token
+    if [[ -z "${HCLOUD_TOKEN:-}" ]]; then
+        die "HCLOUD_TOKEN environment variable required for snapshot.\n       Get your token from: https://console.hetzner.cloud/ → Security → API Tokens"
+    fi
+
+    # Check for jq (needed to parse metadata)
+    if ! command -v jq &>/dev/null; then
+        die "jq is required for snapshot mode. Install with: sudo apt install jq"
+    fi
+
+    # Get server ID from Hetzner metadata service
+    log_info "Detecting server ID from Hetzner metadata..."
+    local server_id
+    server_id=$(curl -fsSL http://169.254.169.254/hetzner/v1/metadata | jq -r '.instance-id' 2>/dev/null) || true
+    
+    if [[ -z "$server_id" || "$server_id" == "null" ]]; then
+        die "Could not detect server ID from Hetzner metadata.\n       Are you running on a Hetzner Cloud server?"
+    fi
+    log_ok "Server ID: $server_id"
+
+    # Generate snapshot label
+    local snapshot_label
+    snapshot_label="$(hostname)-$(date +%Y%m%d)"
+    log_info "Snapshot label: $snapshot_label"
+
+    # Confirm before proceeding
+    echo
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo -e "${YELLOW}  WARNING: Server will POWER OFF for snapshot${RESET}"
+    echo -e "${YELLOW}  SSH session will disconnect${RESET}"
+    echo -e "${YELLOW}  Server will restart automatically when complete${RESET}"
+    echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo
+    read -r -p "Proceed with snapshot? [y/N] " confirm
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        die "Snapshot cancelled by user"
+    fi
+
+    # Trigger snapshot via API
+    log_info "Initiating snapshot via Hetzner API..."
+    local response
+    response=$(curl -fsSL \
+        -H "Authorization: Bearer $HCLOUD_TOKEN" \
+        -H "Content-Type: application/json" \
+        -X POST \
+        -d "{\"description\": \"$snapshot_label\", \"type\": \"snapshot\", \"labels\": {\"created\": \"$(date +%Y-%m-%d)\"}}" \
+        "https://api.hetzner.cloud/v1/servers/$server_id/actions/create_image" 2>&1) || {
+        die "Failed to initiate snapshot. Check HCLOUD_TOKEN and server ID.\nResponse: $response"
+    }
+
+    log_ok "Snapshot initiated successfully!"
+    log_info "Server will power off, create snapshot, then restart."
+    log_info "Monitor progress in Hetzner Cloud Console."
+    
+    echo
+    echo -e "${GREEN}══════════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}  Snapshot process started${RESET}"
+    echo -e "${GREEN}══════════════════════════════════════════════${RESET}"
+}
+
 # --- Preflight checks --------------------------------------------------------
 
 preflight() {
-    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb]"
+    [[ -z "$USERNAME" ]] && die "Username required. Usage: $0 <username> [swap_size_gb|--verify|--snapshot]"
     [[ "$EUID" -eq 0 ]] && die "Run as the non-root sudo user, not root directly."
     [[ "$(whoami)" == "$USERNAME" ]] \
         || die "Run this script as '$USERNAME', not as '$(whoami)'. Switch users first."
@@ -1031,6 +1177,36 @@ main() {
 
     if [[ "$VERIFY_ONLY" == true ]]; then
         run_verify
+        exit 0
+    fi
+
+    if [[ "$SNAPSHOT_MODE" == true ]]; then
+        log_section "SNAPSHOT MODE"
+        log_info "Running verification checks before snapshot..."
+        
+        # Run verify but capture if there are issues
+        WARNINGS=()
+        if ! run_verify 2>&1 | tee /tmp/verify_output.log; then
+            die "Verification checks failed. Review output above. Fix issues before snapshot."
+        fi
+        
+        # Check if there were warnings in verify output
+        if grep -q "WARNING\|ERROR\|✗" /tmp/verify_output.log 2>/dev/null; then
+            echo
+            log_warn "Verification found issues (see above). Review before proceeding."
+            read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
+            [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Fix issues and retry."
+        fi
+        
+        rm -f /tmp/verify_output.log
+        log_ok "Verification passed"
+        
+        # Run hygiene
+        run_hygiene
+        
+        # Trigger snapshot via API
+        trigger_snapshot
+        
         exit 0
     fi
 
