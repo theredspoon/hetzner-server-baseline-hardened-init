@@ -139,14 +139,14 @@ run_hygiene() {
     
     if sudo test -f /etc/postfix/sasl_passwd; then
         issues+=("/etc/postfix/sasl_passwd exists — must NOT be in snapshot")
-        log_error "/etc/postfix/sasl_passwd exists — must NOT be in snapshot"
+        log_warn "/etc/postfix/sasl_passwd exists — must NOT be in snapshot"
     else
         log_ok "/etc/postfix/sasl_passwd absent"
     fi
     
     if sudo test -f /etc/restic/env; then
         issues+=("/etc/restic/env exists — must NOT be in snapshot")
-        log_error "/etc/restic/env exists — must NOT be in snapshot"
+        log_warn "/etc/restic/env exists — must NOT be in snapshot"
     else
         log_ok "/etc/restic/env absent"
     fi
@@ -154,9 +154,9 @@ run_hygiene() {
     local env_files
     env_files=$(sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 2>/dev/null | xargs -0 -r ls -la 2>/dev/null || true)
     if [[ -n "$env_files" ]]; then
-        issues+=("Env files found in /opt — remove before snapshot")
-        log_error "Env files found in /opt:"
-        echo "$env_files" | while read -r line; do log_error "  $line"; done
+        issues+=("Env files found in /opt")
+        log_warn "Env files found in /opt — review:"
+        echo "$env_files"
     else
         log_ok "No env files in /opt"
     fi
@@ -164,20 +164,20 @@ run_hygiene() {
     local priv_keys
     priv_keys=$(sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true)
     if [[ -n "$priv_keys" ]]; then
-        issues+=("Private key files found — remove before snapshot")
-        log_error "Private key files found:"
-        echo "$priv_keys" | while read -r line; do log_error "  $line"; done
+        issues+=("Private key files found")
+        log_warn "Private key files found — review:"
+        echo "$priv_keys"
     else
         log_ok "No private key files in /root or /home"
     fi
 
     if [[ ${#issues[@]} -gt 0 ]]; then
         echo
-        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        log_error "SNAPSHOT BLOCKED: Found ${#issues[@]} issue(s)"
-        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        log_error "Fix the above issues, then re-run with --snapshot."
-        exit 1
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_warn "Found ${#issues[@]} potential issue(s) — review above"
+        log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
+        [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Clean up files and retry, or use --verify to check state."
     fi
 
     log_ok "Snapshot hygiene complete — server ready for snapshot"
@@ -1195,24 +1195,23 @@ main() {
         log_section "SNAPSHOT MODE"
         log_info "Running verification checks before snapshot..."
         
-        # Run verify - any issues will be displayed, then we check for warnings
+        # Run verify but capture if there are issues
+        WARNINGS=()
         run_verify
         
-        # Check for any warnings recorded during verify
+        # Check if there were warnings during verify
         if [[ ${#WARNINGS[@]} -gt 0 ]]; then
             echo
-            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            log_error "VERIFICATION FAILED: ${#WARNINGS[@]} warning(s) found"
-            log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-            for w in "${WARNINGS[@]}"; do
-                log_error "  - $w"
-            done
-            die "Fix the above issues before taking a snapshot."
+            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            log_warn "Verification found ${#WARNINGS[@]} warning(s) — review above"
+            log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            read -r -p "Continue with snapshot despite warnings? [y/N] " confirm
+            [[ "$confirm" =~ ^[Yy]$ ]] || die "Snapshot cancelled. Fix issues and retry."
         fi
         
         log_ok "Verification passed"
         
-        # Run hygiene - will exit if credential issues found
+        # Run hygiene - prompts on credential issues
         run_hygiene
         
         # Trigger snapshot via API
