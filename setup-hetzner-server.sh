@@ -1063,7 +1063,7 @@ prompt_hostname() {
     local current_hostname new_hostname
     current_hostname=$(hostnamectl --static 2>/dev/null || hostname 2>/dev/null || echo "unknown")
 
-    echo "  Current hostname: ${BOLD}${current_hostname}${RESET}"
+    printf "  Current hostname: %b%s%b\n" "$BOLD" "$current_hostname" "$RESET"
     read -r -p "  Change hostname now? [y/N] " confirm
 
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
