@@ -1204,6 +1204,13 @@ run_verify() {
 
     echo
     log_info "── Failed systemd units ──"
+    local failed_units
+    failed_units=$(sudo systemctl --failed --no-legend --plain 2>/dev/null || true)
+    if [[ -n "$failed_units" ]]; then
+        warn "Failed systemd units detected"
+    else
+        log_ok "No failed systemd units"
+    fi
     sudo systemctl --no-pager --failed || true
 
     echo
@@ -1359,7 +1366,14 @@ run_verify() {
 
     echo
     log_info "── World-writable files (review any results) ──"
-    sudo find / -xdev -type f -perm -0002 2>/dev/null || true
+    local world_writable
+    world_writable=$(sudo find / -xdev -type f -perm -0002 2>/dev/null || true)
+    if [[ -n "$world_writable" ]]; then
+        warn "World-writable files found"
+        echo "$world_writable"
+    else
+        log_ok "No world-writable files found on /"
+    fi
 
     echo
     log_info "── Enabled systemd units (review for unexpected entries) ──"
@@ -1405,9 +1419,14 @@ run_verify() {
 # SUMMARY
 # =============================================================================
 print_summary() {
-    local script_cmd snapshot_hint
+    local script_cmd snapshot_hint rpfilter_flag
     script_cmd="$0 $USERNAME"
     snapshot_hint="$0 $USERNAME --snapshot ubuntu-24.04-hardened-init-baseline-$(date +%Y%m%d)"
+    rpfilter_flag=""
+
+    if [[ "$ALLOW_RPFILTER_LOOSE" == true ]]; then
+        rpfilter_flag=" --allow-rpfilter-loose"
+    fi
 
     echo
     echo -e "${BOLD}${GREEN}══════════════════════════════════════════════${RESET}"
@@ -1426,9 +1445,9 @@ print_summary() {
     echo "  Remaining manual steps before snapshot:"
     echo "    1. Log out and back in (docker group takes effect)"
     echo "    2. Set timezone:   sudo timedatectl set-timezone UTC"
-    echo "    3. Run verify:     ${script_cmd} --verify"
+    echo "    3. Run verify:     ${script_cmd} --verify${rpfilter_flag}"
     echo "    4. Prepare Hetzner API token (Read & Write permissions)"
-    echo "    5. Run snapshot:   ${snapshot_hint}"
+    echo "    5. Run snapshot:   ${snapshot_hint}${rpfilter_flag}"
     echo
 }
 
