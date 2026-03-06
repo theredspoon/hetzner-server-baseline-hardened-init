@@ -58,6 +58,39 @@ die()         { log_error "$*"; exit 1; }
 WARNINGS=()
 warn() { log_warn "$*"; WARNINGS+=("$*"); }
 
+# Track applied changes and file diffs for end-of-run reporting
+CHANGE_LOG=()
+CHANGE_SNAPSHOT_DIR=""
+declare -A FILE_SNAPSHOTS=()
+
+record_change() { CHANGE_LOG+=("$*"); }
+
+init_change_tracking() {
+    CHANGE_SNAPSHOT_DIR=$(mktemp -d /tmp/hetzner-setup-changes.XXXXXX)
+    log_info "Change tracking enabled: $CHANGE_SNAPSHOT_DIR"
+}
+
+track_file_before_change() {
+    local file="$1"
+    local snap
+
+    [[ -n "${FILE_SNAPSHOTS[$file]+x}" ]] && return 0
+
+    if sudo test -e "$file"; then
+        snap="$CHANGE_SNAPSHOT_DIR/$(echo "$file" | tr '/' '_').before"
+        sudo cp -a "$file" "$snap" || die "Failed to snapshot $file"
+        FILE_SNAPSHOTS["$file"]="$snap"
+    else
+        FILE_SNAPSHOTS["$file"]="__ABSENT__"
+    fi
+}
+
+cleanup_change_tracking() {
+    if [[ -n "$CHANGE_SNAPSHOT_DIR" && -d "$CHANGE_SNAPSHOT_DIR" ]]; then
+        sudo rm -rf "$CHANGE_SNAPSHOT_DIR" || true
+    fi
+}
+
 # --- Preflight checks --------------------------------------------------------
 
 preflight() {
@@ -94,6 +127,7 @@ apt_install() {
     sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}" \
         || die "apt install failed for: ${missing[*]}"
     log_ok "Installed: ${missing[*]}"
+    record_change "Installed packages: ${missing[*]}"
 }
 
 # Set a directive in sshd_config.
@@ -108,14 +142,17 @@ set_sshd_directive() {
         return
     fi
 
+    track_file_before_change "$file"
     if grep -qE "^[#[:space:]]*${key}[[:space:]]" "$file"; then
         sudo sed -i -E "s|^[#[:space:]]*${key}[[:space:]].*|${full}|" "$file" \
             || die "Failed to set sshd directive: $key"
         log_ok "sshd: $full (updated)"
+        record_change "Updated sshd directive: $full"
     else
         echo "$full" | sudo tee -a "$file" > /dev/null \
             || die "Failed to append sshd directive: $key"
         log_ok "sshd: $full (added)"
+        record_change "Added sshd directive: $full"
     fi
 }
 
@@ -142,6 +179,7 @@ ensure_root_file_content() {
 
     cat > "$tmp"
 
+    track_file_before_change "$file"
     if sudo test -f "$file" && sudo cmp -s "$tmp" "$file"; then
         rm -f "$tmp"
         log_ok "$label already up to date"
@@ -152,6 +190,7 @@ ensure_root_file_content() {
         || die "Failed to write $file"
     rm -f "$tmp"
     log_ok "$label written"
+    record_change "Updated file content: $file"
 }
 
 # =============================================================================
@@ -197,21 +236,27 @@ s3_ssh_hardening() {
             ' "$cfg"; then
             log_ok "sshd: AllowUsers already includes $USERNAME"
         else
+            track_file_before_change "$cfg"
             sudo sed -i -E "s|^([[:space:]]*AllowUsers[[:space:]].*)|\1 ${USERNAME}|" "$cfg" \
                 || die "Failed to add $USERNAME to existing AllowUsers line"
             log_ok "sshd: $USERNAME appended to existing AllowUsers line"
+            record_change "Updated AllowUsers to include: $USERNAME"
         fi
     else
         # Insert before the first Match block to avoid conditional scope ambiguity.
         # If no Match block exists, append at end of file.
         if grep -qE "^Match " "$cfg"; then
+            track_file_before_change "$cfg"
             sudo sed -i "/^Match /i AllowUsers ${USERNAME}" "$cfg" \
                 || die "Failed to insert AllowUsers before Match block"
             log_ok "sshd: AllowUsers ${USERNAME} inserted before first Match block"
+            record_change "Inserted AllowUsers ${USERNAME} before Match block"
         else
+            track_file_before_change "$cfg"
             echo "AllowUsers ${USERNAME}" | sudo tee -a "$cfg" > /dev/null \
                 || die "Failed to append AllowUsers to $cfg"
             log_ok "sshd: AllowUsers ${USERNAME} (added)"
+            record_change "Added AllowUsers ${USERNAME}"
         fi
     fi
 
@@ -220,6 +265,7 @@ s3_ssh_hardening() {
 
     sudo systemctl restart ssh || die "Failed to restart SSH"
     log_ok "SSH service restarted"
+    record_change "Restarted service: ssh"
 
     # Lock root password — defence-in-depth against local escalation
     if sudo passwd -S root | grep -q " L "; then
@@ -227,6 +273,7 @@ s3_ssh_hardening() {
     else
         sudo passwd -l root || die "Failed to lock root password"
         log_ok "Root password locked"
+        record_change "Locked root password"
     fi
 
     log_info "SSH host key fingerprint (record in LOGBOOK):"
@@ -263,11 +310,13 @@ s4_package_updates() {
     if grep -qE '^[[:space:]]*"[^"]*\$\{distro_codename\}-updates"' "$uu50"; then
         log_ok "unattended-upgrades: -updates origin already active"
     elif grep -qE '^[[:space:]]*//.*\$\{distro_codename\}-updates' "$uu50"; then
+        track_file_before_change "$uu50"
         sudo sed -i -E 's|^([[:space:]]*)//([[:space:]]*".*\$\{distro_codename\}-updates";)|\1\2|' "$uu50" \
             || die "Failed to uncomment -updates in $uu50"
         # Verify it took
         if grep -qE '^[[:space:]]*"[^"]*\$\{distro_codename\}-updates"' "$uu50"; then
             log_ok "unattended-upgrades: -updates origin uncommented"
+            record_change "Enabled unattended-upgrades -updates origin"
         else
             warn "unattended-upgrades: attempted to uncomment -updates but result not confirmed — check $uu50"
         fi
@@ -280,6 +329,7 @@ s4_package_updates() {
     if grep -qF 'Docker CE' "$uu50"; then
         log_ok "unattended-upgrades: Docker origin already present"
     else
+        track_file_before_change "$uu50"
         # Insert before the closing }; of the Allowed-Origins block
         sudo sed -i "/^Unattended-Upgrade::Allowed-Origins {/,/^};/{
             s|^};|        ${docker_origin}\n};|
@@ -287,6 +337,7 @@ s4_package_updates() {
         # Verify insertion landed
         if grep -qF 'Docker CE' "$uu50"; then
             log_ok "unattended-upgrades: Docker origin added"
+            record_change "Added Docker origin to unattended-upgrades"
         else
             warn "unattended-upgrades: Docker origin insertion did not land — check $uu50 formatting"
         fi
@@ -318,14 +369,17 @@ EOF
         if grep -qF "$nr_target" "$nr_conf"; then
             log_ok "needrestart already set to automatic"
         else
+            track_file_before_change "$nr_conf"
             # Single-quoted sed pattern — no shell expansion of $ or { in program text
             sudo sed -i -E 's|^[[:space:]]*#?[[:space:]]*\$nrconf\{restart\}[[:space:]]*=.*|'"${nr_target}"'|' "$nr_conf"
             if grep -qF "$nr_target" "$nr_conf"; then
                 log_ok "needrestart set to automatic (replaced)"
+                record_change "Set needrestart restart mode to automatic"
             else
                 # sed matched nothing (format differs) — append
                 printf '%s\n' "$nr_target" | sudo tee -a "$nr_conf" > /dev/null
                 log_ok "needrestart set to automatic (appended)"
+                record_change "Appended needrestart restart mode to automatic"
             fi
         fi
     else
@@ -340,6 +394,8 @@ EOF
         log_warn "Reboot now, then re-run this script to continue."
         log_warn "All completed steps will be skipped (idempotent)."
         log_warn "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        print_change_report
+        cleanup_change_tracking
         exit 0
     fi
 }
@@ -355,12 +411,14 @@ s5_firewall() {
     sudo ufw --force default deny incoming  &>/dev/null || die "UFW: failed to set default deny incoming"
     sudo ufw --force default allow outgoing &>/dev/null || die "UFW: failed to set default allow outgoing"
     log_ok "UFW defaults: deny incoming, allow outgoing"
+    record_change "Set UFW default policies: deny incoming, allow outgoing"
 
     if sudo ufw status verbose | grep -qE "^22/tcp.*LIMIT"; then
         log_ok "UFW: OpenSSH rate-limit rule already present"
     else
         sudo ufw limit OpenSSH || die "UFW: failed to add OpenSSH limit rule"
         log_ok "UFW: OpenSSH rate-limit rule added"
+        record_change "Added UFW rule: limit OpenSSH"
     fi
 
     if sudo ufw status | grep -q "Status: active"; then
@@ -368,6 +426,7 @@ s5_firewall() {
     else
         sudo ufw --force enable || die "UFW: failed to enable"
         log_ok "UFW enabled"
+        record_change "Enabled UFW"
     fi
 
     sudo ufw status verbose
@@ -381,13 +440,19 @@ s6_fail2ban() {
 
     apt_install fail2ban
 
-    sudo systemctl enable fail2ban &>/dev/null || die "Failed to enable fail2ban"
+    if ! sudo systemctl is-enabled --quiet fail2ban 2>/dev/null; then
+        sudo systemctl enable fail2ban &>/dev/null || die "Failed to enable fail2ban"
+        record_change "Enabled service: fail2ban"
+    else
+        sudo systemctl enable fail2ban &>/dev/null || die "Failed to enable fail2ban"
+    fi
 
     if sudo systemctl is-active --quiet fail2ban; then
         log_ok "fail2ban already running"
     else
         sudo systemctl start fail2ban || die "Failed to start fail2ban"
         log_ok "fail2ban started"
+        record_change "Started service: fail2ban"
     fi
 
     # Give fail2ban a moment to initialise jails
@@ -420,9 +485,11 @@ s7_monitoring() {
     if grep -q "^Detail = Med" "$lw_conf" 2>/dev/null; then
         log_ok "logwatch detail level already set to Med"
     else
+        track_file_before_change "$lw_conf"
         echo "Detail = Med" | sudo tee "$lw_conf" > /dev/null \
             || die "Failed to write logwatch config"
         log_ok "logwatch detail level set to Med"
+        record_change "Set logwatch detail level to Med"
     fi
 
     # auditd
@@ -477,7 +544,12 @@ s7_monitoring() {
 -w /sbin/modprobe -p x -k modules
 AUDIT_RULES
 
-    sudo systemctl enable auditd &>/dev/null || die "Failed to enable auditd"
+    if ! sudo systemctl is-enabled --quiet auditd 2>/dev/null; then
+        sudo systemctl enable auditd &>/dev/null || die "Failed to enable auditd"
+        record_change "Enabled service: auditd"
+    else
+        sudo systemctl enable auditd &>/dev/null || die "Failed to enable auditd"
+    fi
 
     # Correct order: load rules first, then restart so auditd reads them cleanly
     sudo augenrules --load > /dev/null || die "augenrules --load failed"
@@ -485,9 +557,11 @@ AUDIT_RULES
     if sudo systemctl is-active --quiet auditd; then
         sudo systemctl restart auditd || die "Failed to restart auditd"
         log_ok "auditd restarted with updated rules"
+        record_change "Restarted service: auditd"
     else
         sudo systemctl start auditd || die "Failed to start auditd"
         log_ok "auditd started"
+        record_change "Started service: auditd"
     fi
 
     local rule_count
@@ -515,6 +589,7 @@ s8_swap() {
         log_warn "Swapfile exists but not active — activating"
         sudo swapon /swapfile || die "swapon failed"
         log_ok "Swapfile activated"
+        record_change "Activated existing swapfile"
     else
         # Check available disk space before allocating
         local avail_gb needed
@@ -532,14 +607,17 @@ s8_swap() {
         sudo mkswap /swapfile  || die "mkswap failed"
         sudo swapon /swapfile  || die "swapon failed"
         log_ok "Swapfile created and activated (${SWAP_GB}G)"
+        record_change "Created and activated swapfile (${SWAP_GB}G)"
     fi
 
     if grep -q "^/swapfile " /etc/fstab; then
         log_ok "Swapfile already in /etc/fstab"
     else
+        track_file_before_change "/etc/fstab"
         echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab > /dev/null \
             || die "Failed to add swapfile to /etc/fstab"
         log_ok "Swapfile entry added to /etc/fstab"
+        record_change "Added /swapfile entry to /etc/fstab"
     fi
 
     log_info "Memory after swap:"
@@ -558,6 +636,7 @@ s9_docker() {
         log_info "Installing Docker via get.docker.com"
         curl -fsSL https://get.docker.com | sudo sh || die "Docker install script failed"
         log_ok "Docker installed"
+        record_change "Installed Docker via get.docker.com"
     fi
 
     if id -nG "$USERNAME" | grep -qw docker; then
@@ -565,8 +644,15 @@ s9_docker() {
     else
         sudo usermod -aG docker "$USERNAME" || die "Failed to add $USERNAME to docker group"
         log_ok "User $USERNAME added to docker group (log out/in required for effect)"
+        record_change "Added user to docker group: $USERNAME"
     fi
 
+    if ! sudo systemctl is-enabled --quiet docker 2>/dev/null; then
+        record_change "Enabled service: docker"
+    fi
+    if ! sudo systemctl is-active --quiet docker; then
+        record_change "Started service: docker"
+    fi
     sudo systemctl enable --now docker &>/dev/null || die "Failed to enable Docker"
     log_ok "Docker enabled and started"
 
@@ -577,6 +663,7 @@ s9_docker() {
     if [[ -f "$daemon_json" ]] && jq -e '."log-driver" == "local"' "$daemon_json" &>/dev/null; then
         log_ok "Docker log driver already set to local"
     else
+        track_file_before_change "$daemon_json"
         local tmp
         tmp=$(mktemp)
         # Temporary EXIT cleanup trap — ensures tmp is removed if die() calls exit 1.
@@ -602,6 +689,8 @@ s9_docker() {
         sudo chmod 644 "$daemon_json"
         sudo systemctl restart docker || die "Docker restart failed after log driver change"
         log_ok "Docker log driver set to local"
+        record_change "Set Docker logging driver to local"
+        record_change "Restarted service: docker"
     fi
 
     local actual_driver
@@ -641,6 +730,7 @@ EOF
     sudo systemctl enable docker-prune.timer &>/dev/null || die "Failed to enable docker-prune.timer"
     sudo systemctl start  docker-prune.timer || die "Failed to start docker-prune.timer"
     log_ok "docker-prune.timer enabled and started"
+    record_change "Enabled and started timer: docker-prune.timer"
 }
 
 # =============================================================================
@@ -675,6 +765,7 @@ EOF
 
     sudo sysctl --system > /dev/null || die "sysctl --system failed"
     log_ok "sysctl rules applied"
+    record_change "Applied sysctl settings"
 
     # Verify individual values
     local syncookies suid_dumpable
@@ -711,13 +802,19 @@ s11_postfix() {
     # are configured post-deployment — do not snapshot with credentials in place.
     apt_install postfix
 
-    sudo systemctl enable postfix &>/dev/null || die "Failed to enable postfix"
+    if ! sudo systemctl is-enabled --quiet postfix 2>/dev/null; then
+        sudo systemctl enable postfix &>/dev/null || die "Failed to enable postfix"
+        record_change "Enabled service: postfix"
+    else
+        sudo systemctl enable postfix &>/dev/null || die "Failed to enable postfix"
+    fi
 
     if sudo systemctl is-active --quiet postfix; then
         log_ok "postfix already running"
     else
         sudo systemctl start postfix || die "Failed to start postfix"
         log_ok "postfix started"
+        record_change "Started service: postfix"
     fi
 
     local version
@@ -738,6 +835,59 @@ s12_backups() {
     version=$(restic version 2>/dev/null | head -1 || echo "unknown")
     log_ok "restic installed: $version"
     log_info "Object Storage credentials and repository init are post-deployment."
+}
+
+# =============================================================================
+# CHANGE REPORT
+# =============================================================================
+print_change_report() {
+    local file
+    local -a changed_files=()
+
+    echo
+    echo -e "${BOLD}${BLUE}── Change Report ──${RESET}"
+
+    if [[ ${#CHANGE_LOG[@]} -eq 0 ]]; then
+        echo "  No state changes recorded."
+    else
+        echo "  State changes applied:"
+        for entry in "${CHANGE_LOG[@]}"; do
+            echo "    - $entry"
+        done
+    fi
+
+    for file in "${!FILE_SNAPSHOTS[@]}"; do
+        local before
+        before="${FILE_SNAPSHOTS[$file]}"
+        if [[ "$before" == "__ABSENT__" ]]; then
+            if sudo test -e "$file"; then
+                changed_files+=("$file")
+            fi
+        else
+            if ! sudo cmp -s "$before" "$file"; then
+                changed_files+=("$file")
+            fi
+        fi
+    done
+
+    if [[ ${#changed_files[@]} -eq 0 ]]; then
+        echo "  File diffs: none"
+        return
+    fi
+
+    echo
+    echo "  File diffs:"
+    while IFS= read -r file; do
+        local before
+        before="${FILE_SNAPSHOTS[$file]}"
+        echo
+        echo "  >>> $file"
+        if [[ "$before" == "__ABSENT__" ]]; then
+            sudo diff -u /dev/null "$file" || true
+        else
+            sudo diff -u "$before" "$file" || true
+        fi
+    done < <(printf '%s\n' "${changed_files[@]}" | sort -u)
 }
 
 # =============================================================================
@@ -885,6 +1035,8 @@ main() {
         exit 0
     fi
 
+    init_change_tracking
+
     s3_ssh_hardening
     s4_package_updates
     s5_firewall
@@ -896,7 +1048,9 @@ main() {
     s11_postfix
     s12_backups
 
+    print_change_report
     print_summary
+    cleanup_change_tracking
 }
 
 main
