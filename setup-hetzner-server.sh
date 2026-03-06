@@ -11,11 +11,13 @@
 #   ./setup-hetzner-server.sh <username> [swap_size_gb]
 #   ./setup-hetzner-server.sh <username> --verify              # validation only
 #   ./setup-hetzner-server.sh <username> --snapshot <name>     # verify + hygiene + snapshot
+#   ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh <username> --verify
 #
 # Examples:
 #   ./setup-hetzner-server.sh finless1strepair 2
 #   ./setup-hetzner-server.sh finless1strepair --verify
-#   ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-baseline-20260306
+#   ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-hardened-init-baseline-20260306
+#   ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh finless1strepair --snapshot ubuntu-24.04-hardened-init-baseline-20260306
 #
 # The script is idempotent — safe to re-run after a reboot or partial failure.
 # =============================================================================
@@ -30,6 +32,7 @@ SWAP_GB="2"
 VERIFY_ONLY=false
 SNAPSHOT_MODE=false
 SNAPSHOT_NAME=""
+ALLOW_RPFILTER_LOOSE="${ALLOW_RPFILTER_LOOSE:-false}"
 
 if [[ $# -ge 2 ]]; then
     if [[ "$2" == "--verify" ]]; then
@@ -1317,7 +1320,11 @@ run_verify() {
                 log_ok "Primary interface rp_filter is strict (1)"
                 ;;
             2)
-                info_note "net.ipv4.conf.${iface}.rp_filter = 2 (loose mode). Acceptable only when intentional multi-path routing is configured, such as Tailscale."
+                if [[ "$ALLOW_RPFILTER_LOOSE" == "true" ]]; then
+                    info_note "net.ipv4.conf.${iface}.rp_filter = 2 (loose mode). Allowed by ALLOW_RPFILTER_LOOSE=true for intentional multi-path routing such as Tailscale."
+                else
+                    warn "net.ipv4.conf.${iface}.rp_filter = 2. Base image expects 1. Re-run with ALLOW_RPFILTER_LOOSE=true only when intentional multi-path routing is configured, such as Tailscale."
+                fi
                 ;;
             0)
                 warn "net.ipv4.conf.${iface}.rp_filter = 0, expected 1 for the base image and never 0"

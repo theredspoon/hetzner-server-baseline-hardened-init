@@ -524,6 +524,12 @@ For reverse path filtering, the base image target is strict mode (`1`). On a pla
 
 If Tailscale, subnet routing, policy routing, multiple interfaces, or other intentional multi-path networking is added later, loose mode (`2`) may be acceptable on the active interface. Disabled mode (`0`) is not acceptable.
 
+The setup script enforces this distinction explicitly:
+
+- Default behavior: `rp_filter=1` is expected on the primary interface
+- If intentional multi-path routing is configured, re-run verification or snapshot mode with `ALLOW_RPFILTER_LOOSE=true`
+- Do not use `ALLOW_RPFILTER_LOOSE=true` on a plain baseline server
+
 ---
 
 ## 11. Outbound Email Alerting — postfix relay
@@ -616,6 +622,8 @@ sysctl net.ipv4.conf.$(ip route | awk '/default/{print $5; exit}').rp_filter
 # Base image target: 1
 # 2 is acceptable only when intentional multi-path routing exists (for example Tailscale or other advanced networking)
 # 0 is not acceptable
+# Script override for intentional multi-path routing:
+# ALLOW_RPFILTER_LOOSE=true ./setup-hetzner-server.sh <username> --verify
 sudo systemctl list-unit-files --state=enabled
 # Review for unexpected enabled services before freezing image
 ```
