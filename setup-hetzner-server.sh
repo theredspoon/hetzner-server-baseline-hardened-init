@@ -197,11 +197,17 @@ trigger_snapshot() {
     # Get server ID from Hetzner metadata service
     log_info "Detecting server ID from Hetzner metadata..."
     local server_id
-    server_id=$(curl -fsSL http://169.254.169.254/hetzner/v1/metadata | jq -r '.instance-id' 2>/dev/null) || true
+    server_id=$(curl -fsSL --max-time 5 http://169.254.169.254/hetzner/v1/metadata 2>/dev/null | jq -r '.instance-id' 2>/dev/null) || true
     
     if [[ -z "$server_id" || "$server_id" == "null" ]]; then
         die "Could not detect server ID from Hetzner metadata.\n       Are you running on a Hetzner Cloud server?"
     fi
+    
+    # Validate server_id is numeric
+    if [[ ! "$server_id" =~ ^[0-9]+$ ]]; then
+        die "Invalid server ID detected: $server_id"
+    fi
+    
     log_ok "Server ID: $server_id"
 
     # Use provided snapshot name
@@ -228,17 +234,42 @@ trigger_snapshot() {
 
     # Trigger snapshot via API
     log_info "Initiating snapshot via Hetzner API..."
-    local response
-    response=$(curl -fsSL \
+    local response http_code
+    response=$(curl -sSL \
+        --max-time 30 \
+        --no-location \
+        -w "\n%{http_code}" \
         -H "Authorization: Bearer $HCLOUD_TOKEN" \
         -H "Content-Type: application/json" \
         -X POST \
         -d "{\"description\": \"$SNAPSHOT_NAME\", \"type\": \"snapshot\", \"labels\": {\"created\": \"$(date +%Y-%m-%d)\"}}" \
-        "https://api.hetzner.cloud/v1/servers/$server_id/actions/create_image" 2>&1) || {
-        die "Failed to initiate snapshot. Check API token is valid and has Read & Write permissions.\nResponse: $response"
-    }
-
-    log_ok "Snapshot initiated successfully!"
+        "https://api.hetzner.cloud/v1/servers/$server_id/actions/create_image" 2>&1) || true
+    
+    # Extract HTTP code from last line
+    http_code=$(echo "$response" | tail -n1)
+    response=$(echo "$response" | sed '$d')
+    
+    # Check response codes
+    case "$http_code" in
+        201)
+            log_ok "Snapshot initiated successfully!"
+            ;;
+        401)
+            die "API authentication failed. Check your API token is valid."
+            ;;
+        403)
+            die "API permission denied. Ensure token has Read & Write permissions."
+            ;;
+        404)
+            die "Server not found. Check server ID: $server_id"
+            ;;
+        429)
+            die "Rate limit exceeded. Wait a moment and try again."
+            ;;
+        *)
+            die "Failed to initiate snapshot (HTTP $http_code).\nResponse: $response"
+            ;;
+    esac
     log_info "Server will power off, create snapshot, then restart."
     log_info "Monitor progress in Hetzner Cloud Console."
     
@@ -1194,6 +1225,14 @@ main() {
     if [[ "$SNAPSHOT_MODE" == true ]]; then
         log_section "SNAPSHOT MODE"
         
+        # Validate snapshot name
+        if [[ ${#SNAPSHOT_NAME} -gt 255 ]]; then
+            die "Snapshot name too long (max 255 characters)"
+        fi
+        if [[ ! "$SNAPSHOT_NAME" =~ ^[a-zA-Z0-9._-]+$ ]]; then
+            die "Snapshot name contains invalid characters. Use only: a-z, A-Z, 0-9, ., _, -"
+        fi
+        
         # Prompt for API token (not passed as parameter to avoid shell history)
         echo
         echo -e "${BLUE}Enter Hetzner API token (input will be hidden):${RESET}"
@@ -1206,6 +1245,9 @@ main() {
         if [[ -z "$HCLOUD_TOKEN" ]]; then
             die "API token is required for snapshot mode"
         fi
+        
+        # Clear token from memory after use (set in subshell that will exit)
+        trap 'unset HCLOUD_TOKEN 2>/dev/null || true' EXIT
         
         log_info "Running verification checks before snapshot..."
         
