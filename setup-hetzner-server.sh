@@ -1014,8 +1014,7 @@ print_summary() {
     echo "    4. Run verify:     $0 $USERNAME --verify"
     echo "    5. Delete script:  rm ~/$( basename "$0" )"
     echo "    6. Run snapshot hygiene (section 14 of runbook)"
-    echo "    7. Take snapshot in Hetzner console:"
-    echo "       Label: ubuntu-24.04-baseline-$(date +%Y%m%d)"
+    echo "    7. Take snapshot in Hetzner console"
     echo
 }
 
