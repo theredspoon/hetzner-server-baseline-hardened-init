@@ -517,7 +517,7 @@ Verify applied:
 
 ```bash
 sysctl net.ipv4.tcp_syncookies fs.suid_dumpable
-# Should return 1 for both
+# Should return 1 (tcp_syncookies) and 0 (suid_dumpable)
 ```
 
 ---
@@ -587,7 +587,7 @@ If any of these are found during snapshot hygiene, abort and clean before procee
 - [ ] Verify needrestart is set to automatic mode in `/etc/needrestart/needrestart.conf`
 - [ ] Verify Docker log driver is `local` in `/etc/docker/daemon.json`
 - [ ] Verify Docker housekeeping timer is active: `sudo systemctl list-timers docker-prune.timer`
-- [ ] Verify sysctl hardening applied: `sysctl net.ipv4.tcp_syncookies fs.suid_dumpable` should return `1` for both
+- [ ] Verify sysctl hardening applied: `sysctl net.ipv4.tcp_syncookies fs.suid_dumpable` should return `1` for `tcp_syncookies` and `0` for `suid_dumpable`
 - [ ] Verify postfix is running: `sudo systemctl is-active postfix`
 - [ ] Verify restic is installed: `which restic`
 - [ ] Set timezone: `sudo timedatectl set-timezone UTC`
@@ -642,7 +642,7 @@ sudo rm -f /var/lib/systemd/random-seed
 # Confirm no credentials were accidentally written before snapshot
 sudo test -f /etc/postfix/sasl_passwd && echo "WARNING: /etc/postfix/sasl_passwd exists — remove before snapshot" || echo "OK"
 sudo test -f /etc/restic/env && echo "WARNING: /etc/restic/env exists — remove before snapshot" || echo "OK"
-sudo find /opt -name "*.env" -o -name "env" 2>/dev/null -print0 | xargs -0 -r ls -la
+sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 | xargs -0 -r ls -la
 # Review any results — no credential files should be present
 
 # Check for accidentally stored private keys

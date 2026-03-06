@@ -131,6 +131,29 @@ append_if_absent() {
     fi
 }
 
+# Ensure a root-owned file exactly matches expected content from stdin.
+# This makes reruns convergent, not just "create if missing".
+ensure_root_file_content() {
+    local file="$1"
+    local mode="${2:-644}"
+    local label="${3:-$file}"
+    local tmp
+    tmp=$(mktemp)
+
+    cat > "$tmp"
+
+    if sudo test -f "$file" && sudo cmp -s "$tmp" "$file"; then
+        rm -f "$tmp"
+        log_ok "$label already up to date"
+        return
+    fi
+
+    sudo install -o root -g root -m "$mode" "$tmp" "$file" \
+        || die "Failed to write $file"
+    rm -f "$tmp"
+    log_ok "$label written"
+}
+
 # =============================================================================
 # SECTION 3: SSH Hardening
 # =============================================================================
@@ -272,10 +295,7 @@ s4_package_updates() {
     # --- Scalar settings: safe to write to override file ---
     # Scalar assignments in higher-numbered files override lower-numbered ones.
     local override="/etc/apt/apt.conf.d/51unattended-upgrades-local"
-    if [[ -f "$override" ]]; then
-        log_ok "unattended-upgrades scalar override already exists ($override)"
-    else
-        sudo tee "$override" > /dev/null << 'EOF'
+    ensure_root_file_content "$override" "644" "unattended-upgrades scalar override ($override)" << 'EOF'
 // Cleanup
 Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
 Unattended-Upgrade::Remove-New-Unused-Dependencies "true";
@@ -289,8 +309,6 @@ Unattended-Upgrade::Automatic-Reboot-Time "03:00";
 Unattended-Upgrade::Mail "root";
 Unattended-Upgrade::MailOnlyOnError "true";
 EOF
-        log_ok "unattended-upgrades scalar override written ($override)"
-    fi
 
     # --- needrestart ---
     local nr_conf="/etc/needrestart/needrestart.conf"
@@ -411,10 +429,7 @@ s7_monitoring() {
     apt_install auditd
 
     local rules_file="/etc/audit/rules.d/10-ubuntu-base.rules"
-    if sudo test -f "$rules_file"; then
-        log_ok "auditd rules file already present ($rules_file)"
-    else
-        sudo tee "$rules_file" > /dev/null << 'AUDIT_RULES'
+    ensure_root_file_content "$rules_file" "640" "auditd rules file ($rules_file)" << 'AUDIT_RULES'
 # Delete all existing rules
 -D
 
@@ -461,8 +476,6 @@ s7_monitoring() {
 -w /sbin/rmmod -p x -k modules
 -w /sbin/modprobe -p x -k modules
 AUDIT_RULES
-        log_ok "auditd rules file written"
-    fi
 
     sudo systemctl enable auditd &>/dev/null || die "Failed to enable auditd"
 
@@ -601,8 +614,7 @@ s9_docker() {
     local prune_svc="/etc/systemd/system/docker-prune.service"
     local prune_tmr="/etc/systemd/system/docker-prune.timer"
 
-    if [[ ! -f "$prune_svc" ]]; then
-        sudo tee "$prune_svc" > /dev/null << 'EOF'
+    ensure_root_file_content "$prune_svc" "644" "docker-prune.service" << 'EOF'
 [Unit]
 Description=Docker system prune
 After=docker.service
@@ -612,13 +624,8 @@ Requires=docker.service
 Type=oneshot
 ExecStart=/usr/bin/docker system prune -f --filter "until=168h"
 EOF
-        log_ok "docker-prune.service created"
-    else
-        log_ok "docker-prune.service already exists"
-    fi
 
-    if [[ ! -f "$prune_tmr" ]]; then
-        sudo tee "$prune_tmr" > /dev/null << 'EOF'
+    ensure_root_file_content "$prune_tmr" "644" "docker-prune.timer" << 'EOF'
 [Unit]
 Description=Weekly Docker system prune
 
@@ -629,10 +636,6 @@ Persistent=true
 [Install]
 WantedBy=timers.target
 EOF
-        log_ok "docker-prune.timer created"
-    else
-        log_ok "docker-prune.timer already exists"
-    fi
 
     sudo systemctl daemon-reload
     sudo systemctl enable docker-prune.timer &>/dev/null || die "Failed to enable docker-prune.timer"
@@ -648,10 +651,7 @@ s10_kernel_hardening() {
 
     local sysctl_file="/etc/sysctl.d/99-hardening.conf"
 
-    if [[ -f "$sysctl_file" ]]; then
-        log_ok "sysctl hardening file already exists ($sysctl_file)"
-    else
-        sudo tee "$sysctl_file" > /dev/null << 'EOF'
+    ensure_root_file_content "$sysctl_file" "644" "sysctl hardening file ($sysctl_file)" << 'EOF'
 # IP spoofing protection
 net.ipv4.conf.all.rp_filter = 1
 net.ipv4.conf.default.rp_filter = 1
@@ -672,8 +672,6 @@ net.ipv4.tcp_syncookies = 1
 # Prevent privileged process memory leaking to core dumps
 fs.suid_dumpable = 0
 EOF
-        log_ok "sysctl hardening file written"
-    fi
 
     sudo sysctl --system > /dev/null || die "sysctl --system failed"
     log_ok "sysctl rules applied"
@@ -749,6 +747,18 @@ run_verify() {
     log_section "Verification (section 14)"
 
     echo
+    log_info "── Time sync status ──"
+    timedatectl status || true
+
+    echo
+    log_info "── AppArmor status ──"
+    sudo systemctl --no-pager status apparmor || true
+
+    echo
+    log_info "── apt timers ──"
+    systemctl list-timers | grep apt || true
+
+    echo
     log_info "── Failed systemd units ──"
     sudo systemctl --no-pager --failed || true
 
@@ -815,7 +825,7 @@ run_verify() {
         && log_error "WARNING: /etc/restic/env exists — must not be present in snapshot" \
         || log_ok "/etc/restic/env absent"
     local env_files
-    env_files=$(sudo find /opt -name "*.env" -o -name "env" 2>/dev/null -print0 \
+    env_files=$(sudo find /opt \( -name "*.env" -o -name "env" \) 2>/dev/null -print0 \
         | xargs -0 -r ls -la 2>/dev/null || true)
     if [[ -n "$env_files" ]]; then
         log_warn "Env files found in /opt — review:"
@@ -823,6 +833,10 @@ run_verify() {
     else
         log_ok "No env files found in /opt"
     fi
+
+    echo
+    log_info "── Private key file scan (/root and /home) ──"
+    sudo find /root /home \( -name "id_rsa*" -o -name "id_ed25519*" \) 2>/dev/null || true
 }
 
 # =============================================================================
